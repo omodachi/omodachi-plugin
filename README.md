@@ -6,6 +6,13 @@ pairing that a desktop running [Omarchy](https://omarchy.org) draws for itself.
 This repository **is** the plugin. `manifest.json` is at its root, which is
 what `omarchy plugin add` clones, validates and installs.
 
+<p>
+  <img src="https://omodachi.app/img/shots/vm-03-panel-ready.webp" width="400" alt="The Omodachi panel on a fresh Omarchy install, Overview, host connected and ready">
+  <img src="https://omodachi.app/img/shots/vm-05-devices-paired.webp" width="400" alt="The Devices page of the panel after one iPad was let in">
+</p>
+
+<sub>A fresh Omarchy VM, installed from this repository. More at <a href="https://omodachi.app">omodachi.app</a>.</sub>
+
 ## Where this sits
 
 Omodachi turns an iPhone or iPad into an extension of an Omarchy desktop. It
@@ -44,7 +51,12 @@ the host daemon.
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
 carries the full 40-character commit that `v0.1.0` names, the checkout is that
-commit, detached, and any other commit is refused. **Where Sunshine comes from.** That
+commit, detached, and any other commit is refused. Right before it runs
+anything from that checkout, Install checks again that it is exactly the pinned
+commit, with no modified or extra file; `--remove` makes the same check before
+it runs the checkout's uninstaller. If `~/.local/share/omodachi/src` already
+holds something that is not that checkout, Install stops and says so; it never
+runs it and never deletes it. **Where Sunshine comes from.** That
 installer downloads the prebuilt managed Sunshine fork from the Releases of
 [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) and checks
 it against the sha256 pinned in core's `data/versions.json` before unpacking it.
@@ -156,6 +168,18 @@ is in neither that list nor the furniture beside it.
 python3 tests/run_all.py                       # models, contracts, manifests
 python3 scripts/package.py                     # build/<plugin-id>.tar.gz + PACKAGE.json
 python3 scripts/deploy_plugin.py <host>        # content-addressed, no shell restart
+```
+
+To install your own core on a development host, commit it and point the
+installer at that repository and commit. It goes through the same fetch and the
+same check as a release; there is no way to run a copied tree, so do not rsync
+into `~/.local/share/omodachi/src` (Install refuses anything there that is not
+its own checkout):
+
+```sh
+OMODACHI_CORE_SOURCE=file:///path/to/omodachi-core \
+OMODACHI_CORE_COMMIT=$(git -C /path/to/omodachi-core rev-parse HEAD) \
+  python3 tools/install_host.py              # or --source … --commit …
 ```
 
 On the computer:

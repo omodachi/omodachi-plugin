@@ -17,7 +17,10 @@ What it does, in order:
   1. check that git and python3 are here, and say which is missing if not;
   2. fetch the pinned core commit into ~/.local/share/omodachi/src and check
      it out detached, refusing anything whose sha is not the pinned one;
-  3. exec that checkout's own scripts/install_host.py --local, which owns
+  3. check, immediately before running anything from it, that the checkout
+     is exactly the pinned commit: HEAD, its tree, and not one modified or
+     extra file;
+  4. exec that checkout's own scripts/install_host.py --local, which owns
      every decision about units, the virtualenv, the firewall, the Omarchy
      surfaces and the managed Sunshine fork.
 
@@ -37,6 +40,14 @@ plugin was reviewed, a commit cannot. The ref is kept for the one case a git
 server will not hand out a bare sha (old servers without
 `uploadpack.allowReachableSHA1InWant`): the tag is fetched instead and its
 commit has to equal the pinned one, or nothing is checked out.
+
+RELEASE-5. There is no other way in. A ~/.local/share/omodachi/src that is not
+a git checkout (the rsynced tree developers used before this button could
+fetch) is refused and left exactly where it is, never run and never deleted;
+and `--remove` runs a checkout's uninstaller only when that checkout passes
+the same check. A developer installs their own core by pointing
+$OMODACHI_CORE_SOURCE at a git repository and $OMODACHI_CORE_COMMIT at a
+commit in it, which goes through the same fetch and the same check.
 """
 from __future__ import annotations
 
@@ -142,8 +153,15 @@ def purge_only() -> int:
     return 0
 
 
+# A checkout that was already here may carry its own .git/config. Its hooks
+# and fsmonitor are programs, and its replace refs can make a sha name other
+# bytes, so none of them get a say in anything this script asks git.
+GIT_SAFE = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "--no-replace-objects")
+
+
 def _git(*arguments):
-    return run(["git", "-C", str(SOURCE_DIR), *arguments], capture_output=True, text=True)
+    return run(["git", *GIT_SAFE, "-C", str(SOURCE_DIR), *arguments],
+               capture_output=True, text=True)
 
 
 def _error(result) -> str:
@@ -180,24 +198,47 @@ def _checkout_pinned(commit: str) -> tuple[bool, str]:
     return True, ""
 
 
+def pinned_commit(pin: dict) -> str:
+    return (pin.get("commit") or "").strip().lower()
+
+
+def foreign_source() -> str:
+    """Why SOURCE_DIR is not ours to fetch into, or "" when it is.
+
+    Ours means absent, an empty directory, or a git checkout that is a real
+    directory. Anything else - above all a developer's rsynced tree from
+    before this button could fetch one, or a link to their own clone, which a
+    forced checkout would rewrite - is somebody's files: never run, never
+    deleted, only named.
+    """
+    ours = not SOURCE_DIR.is_symlink() and (
+        not SOURCE_DIR.exists()
+        or (SOURCE_DIR.is_dir() and ((SOURCE_DIR / ".git").is_dir() or not any(SOURCE_DIR.iterdir()))))
+    if ours:
+        return ""
+    return (f"{SOURCE_DIR} exists but is not the checkout this installer makes. "
+            f"Move it away (or delete it) and press Install again. "
+            f"Developers: point ${SOURCE_ENV} at a git repository and ${COMMIT_ENV} "
+            f"at the commit to install.")
+
+
 def fetch_source(pin: dict) -> tuple[bool, str]:
     """Fetch the pinned commit and check it out detached. The checkout is ours."""
-    url, ref, commit = pin["url"], pin["ref"], (pin.get("commit") or "").strip().lower()
+    url, ref, commit = pin["url"], pin["ref"], pinned_commit(pin)
     if not is_full_commit(commit):
         return False, (f"{SOURCE_PIN.name} pins no full 40-character commit for core "
                        f"(got {commit or 'nothing'}); set ${COMMIT_ENV} for a staging source")
+    refusal = foreign_source()
+    if refusal:
+        return False, refusal
     if (SOURCE_DIR / ".git").is_dir():
         ok, detail = _fetch_pinned(url, ref, commit)
         if not ok:
             return False, detail
         return _checkout_pinned(commit)
-    if SOURCE_DIR.exists() and any(SOURCE_DIR.iterdir()):
-        # A developer's rsynced tree, from before this button could fetch one.
-        # It is not ours to delete, and it is a perfectly good source.
-        if (SOURCE_DIR / "pyproject.toml").is_file():
-            print(f"using the sources already at {SOURCE_DIR} (not a git checkout)", flush=True)
-            return True, "existing_sources"
-        return False, f"{SOURCE_DIR} exists, is not empty and is not an Omodachi checkout"
+    # Absent or empty. An empty directory the user made stays; only what this
+    # attempt put in it goes if the attempt fails.
+    created = not SOURCE_DIR.exists()
     SOURCE_DIR.mkdir(parents=True, exist_ok=True)
     result = run(["git", "init", "--quiet", str(SOURCE_DIR)], capture_output=True, text=True)
     ok, detail = (result.returncode == 0, _error(result))
@@ -209,8 +250,54 @@ def fetch_source(pin: dict) -> tuple[bool, str]:
     if ok:
         ok, detail = _checkout_pinned(commit)
     if not ok:
-        shutil.rmtree(SOURCE_DIR, ignore_errors=True)
+        if created:
+            shutil.rmtree(SOURCE_DIR, ignore_errors=True)
+        else:
+            for child in SOURCE_DIR.iterdir():
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink(missing_ok=True)
     return ok, detail
+
+
+def verify_checkout(commit: str) -> tuple[bool, str]:
+    """The bytes about to run are the pinned commit's, and nothing else.
+
+    Called immediately before this script executes anything from SOURCE_DIR,
+    install and uninstall alike: HEAD is the pinned commit, HEAD's tree is
+    that commit's tree, the work tree is SOURCE_DIR itself, no tracked file
+    is modified and there is no untracked file. Untracked is judged by the
+    pinned tree's own .gitignore files only, not by the checkout's
+    .git/info/exclude or the user's global excludes, which could hide one.
+    """
+    commit = (commit or "").strip().lower()
+    if not is_full_commit(commit):
+        return False, f"no full 40-character commit is pinned (got {commit or 'nothing'})"
+    if SOURCE_DIR.is_symlink() or not (SOURCE_DIR / ".git").is_dir():
+        return False, f"{SOURCE_DIR} is not a git checkout this installer made"
+    top = _git("rev-parse", "--show-toplevel")
+    where = (top.stdout or "").strip()
+    if top.returncode != 0 or Path(where).resolve() != SOURCE_DIR.resolve():
+        return False, (f"the work tree of {SOURCE_DIR} is {where or 'unknown'}, "
+                       f"not {SOURCE_DIR} itself")
+    head = _git("rev-parse", "--verify", "HEAD^{commit}")
+    got = (head.stdout or "").strip()
+    if head.returncode != 0 or got != commit:
+        return False, f"{SOURCE_DIR} is at {got or 'no commit'}, but the pin is {commit}"
+    trees = [_git("rev-parse", "--verify", f"{name}^{{tree}}") for name in ("HEAD", commit)]
+    have, want = ((result.stdout or "").strip() for result in trees)
+    if any(result.returncode != 0 for result in trees) or not have or have != want:
+        return False, f"the checked-out tree is {have or 'unknown'}, but {commit} has {want or 'unknown'}"
+    changed = _git("status", "--porcelain", "--untracked-files=all")
+    extra = _git("ls-files", "--others", "--exclude-per-directory=.gitignore")
+    for result, what in ((changed, "modified or extra"), (extra, "extra")):
+        lines = (result.stdout or "").splitlines()
+        if result.returncode != 0 or lines:
+            shown = "; ".join(line.strip() for line in lines[:5]) or _error(result) or "git failed"
+            more = f" (and {len(lines) - 5} more)" if len(lines) > 5 else ""
+            return False, f"{SOURCE_DIR} has {what} files: {shown}{more}"
+    return True, ""
 
 
 def main(argv=None) -> int:
@@ -241,6 +328,14 @@ def main(argv=None) -> int:
             return fail(f"{tool} is not installed on this computer.",
                         f"install it first: sudo pacman -S --needed {tool}")
 
+    pin = source_pin()
+    if arguments.source:
+        pin["url"] = arguments.source
+    if arguments.ref:
+        pin["ref"] = arguments.ref
+    if arguments.commit:
+        pin["commit"] = arguments.commit
+
     installer = SOURCE_DIR / "scripts/install_host.py"
     if arguments.remove:
         status("removing")
@@ -255,6 +350,15 @@ def main(argv=None) -> int:
                         f"{installer} does not exist, so there is nothing to remove. "
                         f"Add --purge to delete the device secret, the certificate and the "
                         f"pairings it left behind.")
+        ok, detail = verify_checkout(pinned_commit(pin))
+        if not ok:
+            # Its uninstaller is a program like any other: an unverified
+            # one does not run. `--purge` alone never runs it either.
+            return fail("The Omodachi Host source here is not the pinned commit, "
+                        "so its uninstaller was not run.",
+                        f"{detail}. Press Install first to bring it to the pinned commit and "
+                        f"remove again, or move {SOURCE_DIR} away (or delete it) and run "
+                        f"--remove --purge to delete the files Omodachi Host left behind.")
         command = [sys.executable, str(installer), "--local", "--remove"]
         if arguments.purge:
             command.append("--purge")
@@ -264,13 +368,10 @@ def main(argv=None) -> int:
         status("done", "Omodachi Host removed.")
         return 0
 
-    pin = source_pin()
-    if arguments.source:
-        pin["url"] = arguments.source
-    if arguments.ref:
-        pin["ref"] = arguments.ref
-    if arguments.commit:
-        pin["commit"] = arguments.commit
+    refusal = foreign_source()
+    if refusal:
+        return fail("There is already something at the place Omodachi Host installs from.",
+                    refusal)
     status("fetching", f"Fetching Omodachi Host from {pin['url']} "
                        f"({pin['ref']} = {pin.get('commit') or 'no commit pinned'})…")
     ok, detail = fetch_source(pin)
@@ -280,6 +381,11 @@ def main(argv=None) -> int:
     if not installer.is_file():
         return fail("The downloaded source is not omodachi-core.",
                     f"{installer} is missing. Check the source URL in {SOURCE_PIN.name}.")
+    # Last thing before anything from the checkout runs.
+    ok, detail = verify_checkout(pinned_commit(pin))
+    if not ok:
+        return fail("The Omodachi Host source is not exactly the pinned commit; nothing was run.",
+                    detail)
 
     status("installing")
     code = run([sys.executable, str(installer), "--local", *extra]).returncode
