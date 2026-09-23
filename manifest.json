@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "com.omodachi.host",
+  "name": "Omodachi",
+  "version": "0.1.0",
+  "author": "Omodachi",
+  "license": "MIT",
+  "description": "Host status, one-step device pairing and the Remote defaults this computer keeps.",
+  "kinds": [
+    "panel",
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "panel": "Panel.qml",
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "keepLoaded": true,
+  "barWidget": {
+    "displayName": "Omodachi",
+    "description": "Host status, devices and Remote settings",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "default_page": "overview",
+      "icon_click": "toggle"
+    },
+    "schema": [
+      {
+        "key": "default_page",
+        "type": "enum",
+        "label": "Default page",
+        "description": "Where a left click lands. Right-click always opens Settings.",
+        "options": [
+          "overview",
+          "devices",
+          "settings"
+        ],
+        "defaultValue": "overview"
+      },
+      {
+        "key": "icon_click",
+        "type": "enum",
+        "label": "Click while open",
+        "description": "Whether clicking the icon again closes the panel or leaves it open.",
+        "options": [
+          "toggle",
+          "open"
+        ],
+        "defaultValue": "toggle"
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "_comment": "Where the panel's Install button gets omodachi-core. One owner, one repository, one ref and the full commit that ref names; the bootstrap fetches the commit and checks it out detached, and refuses a ref whose commit differs. $OMODACHI_CORE_SOURCE, $OMODACHI_CORE_REF and $OMODACHI_CORE_COMMIT override them for a staging host.",
+  "core_source": {
+    "owner": "omodachi",
+    "repository": "omodachi-core",
+    "ref": "v0.1.0",
+    "commit": "da63f8275d70d1c45ac72fb6b79dde21e529f6bf"
+  }
+}
