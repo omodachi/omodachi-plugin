@@ -43,14 +43,14 @@ omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
 Then open the Omodachi panel from the bar and press **Install** to put the host
 daemon on the computer.
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.0` tag of
+This is version **0.1.0** of the plugin, and it installs the `v0.1.1` tag of
 the host daemon.
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.0` names, the checkout is that
+carries the full 40-character commit that `v0.1.1` names, the checkout is that
 commit, detached, and any other commit is refused. Right before it runs
 anything from that checkout, Install checks again that it is exactly the pinned
 commit, with no modified or extra file; `--remove` makes the same check before
