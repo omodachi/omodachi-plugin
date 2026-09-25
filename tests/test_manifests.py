@@ -176,7 +176,7 @@ class InstallBootstrapTests(unittest.TestCase):
         # travels with the plugin.
         body = (ROOT / "Service.qml").read_text()
         argv = body.split("terminalProcess.command = [", 1)[1].split("]", 1)[0]
-        self.assertIn('"omarchy-launch-terminal", "python3"', argv)
+        self.assertIn('"omarchy-launch-terminal", "python3", "-I", "-B",', argv)
         self.assertIn('Qt.resolvedUrl("tools/install_host.py")', argv)
         self.assertNotIn("service.installSource", argv)
 

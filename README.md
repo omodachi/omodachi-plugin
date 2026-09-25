@@ -43,20 +43,26 @@ omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
 Then open the Omodachi panel from the bar and press **Install** to put the host
 daemon on the computer.
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.1` tag of
+This is version **0.1.0** of the plugin, and it installs the `v0.1.2` tag of
 the host daemon.
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.1` names, the checkout is that
-commit, detached, and any other commit is refused. Right before it runs
-anything from that checkout, Install checks again that it is exactly the pinned
-commit, with no modified or extra file; `--remove` makes the same check before
-it runs the checkout's uninstaller. If `~/.local/share/omodachi/src` already
-holds something that is not that checkout, Install stops and says so; it never
-runs it and never deletes it. **Where Sunshine comes from.** That
+carries the full 40-character commit that `v0.1.2` names, the checkout is that
+commit, detached, and any other commit is refused. Every Install fetches into a
+new directory, so nothing left in the old checkout is used. Right before it
+runs anything from that checkout, Install deletes every ignored and untracked
+file in it (bytecode caches included) and checks again that it is exactly the
+pinned commit, with no modified, extra or ignored file; `--remove` does the
+same before it runs the checkout's uninstaller. Core's installer then runs as
+`python3 -I -B` with a new, empty bytecode cache directory, so no interpreter
+in the install reads a `.pyc` from beside a source file. If
+`~/.local/share/omodachi/src` already holds something that is not that
+checkout, Install stops and says so; it never runs it and never deletes it.
+The Install button itself runs `python3 -I -B tools/install_host.py`.
+**Where Sunshine comes from.** That
 installer downloads the prebuilt managed Sunshine fork from the Releases of
 [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) and checks
 it against the sha256 pinned in core's `data/versions.json` before unpacking it.
@@ -174,7 +180,8 @@ To install your own core on a development host, commit it and point the
 installer at that repository and commit. It goes through the same fetch and the
 same check as a release; there is no way to run a copied tree, so do not rsync
 into `~/.local/share/omodachi/src` (Install refuses anything there that is not
-its own checkout):
+its own checkout, and deletes every untracked or ignored file inside its own
+checkout before running it):
 
 ```sh
 OMODACHI_CORE_SOURCE=file:///path/to/omodachi-core \

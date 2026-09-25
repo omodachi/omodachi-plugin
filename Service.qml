@@ -492,7 +492,10 @@ Item {
         service.installStage = "starting"
         service.installMessage = "Starting…"
         service.installDetail = ""
-        terminalProcess.command = ["omarchy-launch-terminal", "python3",
+        // RELEASE-7: -I -B - no user site-packages, no PYTHON* variables, not
+        // this plugin's tools/ directory on sys.path, and no bytecode cache
+        // read or written; the bootstrap starts core's installer the same way.
+        terminalProcess.command = ["omarchy-launch-terminal", "python3", "-I", "-B",
             Qt.resolvedUrl("tools/install_host.py").toString().replace("file://", "")]
         terminalProcess.running = true
         installStatusTimer.running = true
