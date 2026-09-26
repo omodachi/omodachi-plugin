@@ -43,25 +43,35 @@ omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
 Then open the Omodachi panel from the bar and press **Install** to put the host
 daemon on the computer.
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.2` tag of
+This is version **0.1.0** of the plugin, and it installs the `v0.1.3` tag of
 the host daemon.
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.2` names, the checkout is that
+carries the full 40-character commit that `v0.1.3` names, the checkout is that
 commit, detached, and any other commit is refused. Every Install fetches into a
 new directory, so nothing left in the old checkout is used. Right before it
-runs anything from that checkout, Install deletes every ignored and untracked
-file in it (bytecode caches included) and checks again that it is exactly the
-pinned commit, with no modified, extra or ignored file; `--remove` does the
-same before it runs the checkout's uninstaller. Core's installer then runs as
-`python3 -I -B` with a new, empty bytecode cache directory, so no interpreter
-in the install reads a `.pyc` from beside a source file. If
-`~/.local/share/omodachi/src` already holds something that is not that
-checkout, Install stops and says so; it never runs it and never deletes it.
+runs anything from that checkout, Install deletes the build output core's
+`.gitignore` names (bytecode caches included) and checks again that it is
+exactly the pinned commit, with no modified, extra or ignored file; `--remove`
+does the same before it runs the checkout's uninstaller. Core's installer then
+runs as `python3 -I -B` with a new, empty bytecode cache directory, so no
+interpreter in the install reads a `.pyc` from beside a source file.
 The Install button itself runs `python3 -I -B tools/install_host.py`.
+
+**What Install will and will not touch.** It only ever replaces, cleans or
+deletes a `~/.local/share/omodachi/src` it made itself, which it knows by a
+random id written into that checkout's `.git` and into
+`~/.local/state/omodachi/core-source.json`. Anything else at that path - your
+own repository, a clone of `omodachi-core`, a file, a link - is left exactly
+as it is: Install and `--remove` stop, say what they found, and tell you to
+move it aside. A checkout made by an earlier version of the plugin is
+recognised as one only if it is still exactly what that version made. If
+Install's own checkout holds a file that is not part of its commit or a
+changed file, it is moved to `~/.local/share/omodachi-kept/` rather than
+deleted.
 **Where Sunshine comes from.** That
 installer downloads the prebuilt managed Sunshine fork from the Releases of
 [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) and checks
@@ -75,7 +85,12 @@ omarchy plugin remove com.omodachi.host
 ```
 
 `--remove` keeps this computer's pairings in `~/.config/omodachi`; add
-`--purge` to delete those too. Removing only the plugin leaves the host daemon
+`--purge` to delete those too, with the rest of the host's state. Neither
+ever deletes your own files: `~/.local/share/omodachi/agent-workspace` (the
+agent's working directory), anything else you put under
+`~/.local/share/omodachi`, and the files you write in `~/.config/omodachi`
+(`omodachi-menu.jsonc`, `desktop-runtime.json`) are kept, and the uninstaller
+prints where they are. Removing only the plugin leaves the host daemon
 running.
 
 **External dependencies.**
@@ -180,8 +195,8 @@ To install your own core on a development host, commit it and point the
 installer at that repository and commit. It goes through the same fetch and the
 same check as a release; there is no way to run a copied tree, so do not rsync
 into `~/.local/share/omodachi/src` (Install refuses anything there that is not
-its own checkout, and deletes every untracked or ignored file inside its own
-checkout before running it):
+its own checkout, deletes the build output inside its own checkout before
+running it, and refuses a file there that is not build output):
 
 ```sh
 OMODACHI_CORE_SOURCE=file:///path/to/omodachi-core \

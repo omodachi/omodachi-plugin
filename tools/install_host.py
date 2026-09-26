@@ -18,9 +18,10 @@ What it does, in order:
   2. fetch the pinned core commit into a new directory, check it out
      detached, refusing anything whose sha is not the pinned one, and put it
      at ~/.local/share/omodachi/src;
-  3. immediately before running anything from it, delete every ignored and
-     untracked file in the checkout and check that it is exactly the pinned
-     commit: HEAD, its tree, and not one modified, extra or ignored file;
+  3. immediately before running anything from it, delete the build output
+     the pinned .gitignore names and check that the checkout is exactly the
+     pinned commit: HEAD, its tree, and not one modified, extra or ignored
+     file (an extra file that is not build output fails the check, and stays);
   4. run that checkout's own scripts/install_host.py --local under
      `python3 -I -B`, which owns every decision about units, the virtualenv,
      the firewall, the Omarchy surfaces and the managed Sunshine fork.
@@ -63,6 +64,17 @@ the same prefix and no PYTHON* variables from the caller in its children's
 environment, so no interpreter in the install reads a bytecode cache from the
 checkout, a user site-packages .pth, PYTHONPATH or PYTHONSTARTUP. This file
 re-runs itself the same way (-I -B) when it was started without them.
+
+RELEASE-8. The only src this installer replaces, cleans or deletes is one it
+can show it made: a random id it wrote into that checkout's .git, repeated in
+~/.local/state/omodachi/core-source.json (0600). Anything else there - a
+user's repository, a clone of omodachi-core at the pinned commit, a file, a
+link, an empty directory - is described and left exactly as it is, for Install
+and `--remove` (with or without --purge) alike; only a checkout that an
+earlier version of this installer made is recognised as one and adopted. Even
+our own checkout is deleted only when it holds nothing but its commit and the
+build output that commit's .gitignore names; otherwise Install moves it to
+~/.local/share/omodachi-kept/, and `--remove` refuses.
 """
 from __future__ import annotations
 
@@ -79,7 +91,10 @@ if __name__ == "__main__" and sys.executable and not (sys.flags.isolated and sys
     os.execv(sys.executable, [sys.executable, "-I", "-B", os.path.realpath(__file__), *sys.argv[1:]])
 
 import argparse  # noqa: E402 - after the re-exec above, on purpose
+import fcntl  # noqa: E402
 import json  # noqa: E402
+import secrets  # noqa: E402
+import shlex  # noqa: E402
 from pathlib import Path  # noqa: E402
 import shutil  # noqa: E402
 import subprocess  # noqa: E402
@@ -107,6 +122,26 @@ STAGES = {
 }
 
 
+def write_file(path: Path, text: str, mode: int) -> None:
+    """Every file this script writes goes through here (RELEASE-8): a new
+    temporary beside it, created exclusively and never through a link
+    (O_EXCL | O_NOFOLLOW), synced, then renamed over the target - and a rename
+    replaces a link at the target instead of writing where it points."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.unlink(missing_ok=True)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, mode)
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
 def status(stage: str, message: str = "", *, detail: str = "") -> None:
     """One small JSON file the panel polls. Never fails the install."""
     try:
@@ -115,9 +150,7 @@ def status(stage: str, message: str = "", *, detail: str = "") -> None:
                 "message": message or STAGES.get(stage, stage), "detail": detail,
                 "ok": None if stage not in ("done", "failed") else (stage == "done"),
                 "pid": os.getpid(), "updated": time.time()}
-        temporary = STATUS_PATH.with_suffix(".tmp")
-        temporary.write_text(json.dumps(body))
-        temporary.replace(STATUS_PATH)
+        write_file(STATUS_PATH, json.dumps(body), 0o644)
     except OSError:
         pass
     print(f"[{stage}] {message or STAGES.get(stage, stage)}"
@@ -160,22 +193,63 @@ def run(argv, **kwargs):
     return subprocess.run(argv, **kwargs)
 
 
-# What `--purge` takes when core's installer is already gone. Every one of
-# these is a directory this project made under the user's own home; nothing
-# here is shared with Omarchy or with any other program.
-PURGE_DIRECTORIES = (".config/omodachi", ".cache/omodachi",
-                     ".local/state/omodachi", ".local/share/omodachi")
+# What `--purge` takes when core's installer is already gone - the same rule
+# core's own --purge follows (RELEASE-8): what the installer and its daemon
+# made, never the user's own files. Kept: ~/.local/share/omodachi/agent-workspace
+# (the agent's working directory), anything else there nobody here made, and
+# the files a person writes in ~/.config/omodachi by hand (the menu layer, its
+# set-aside copies, desktop-runtime.json). src goes only if it is ours.
+SHARE_MADE = ("venv", "venv.previous")
+USER_CONFIG = ("omodachi-menu.jsonc", "desktop-runtime.json")
+USER_CONFIG_PREFIXES = ("omodachi-menu.jsonc.codex-bak",)
+
+
+def _delete(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        path.unlink(missing_ok=True)
+    else:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _children(directory: Path) -> list[Path]:
+    return sorted(directory.iterdir()) if _real_dir(directory) else []
+
+
+def _remove_empty(directory: Path) -> None:
+    try:
+        if _real_dir(directory):
+            directory.rmdir()
+    except OSError:
+        pass  # something in it is not ours
 
 
 def purge_only() -> int:
-    present = [relative for relative in PURGE_DIRECTORIES if (HOME / relative).is_dir()]
-    # The status file lives in one of these directories, so it is written
-    # before they go - otherwise the last act of a purge is to recreate
-    # ~/.cache/omodachi and leave it behind.
+    share, config = SOURCE_DIR.parent, HOME / ".config/omodachi"
+    kept = [child for child in _children(config)
+            if child.name in USER_CONFIG or child.name.startswith(USER_CONFIG_PREFIXES)]
+    for child in _children(config):
+        if child not in kept:
+            _delete(child)
+    _remove_empty(config)
+    for name in SHARE_MADE:
+        if os.path.lexists(share / name):
+            _delete(share / name)
+    for directory in sorted((share / "hooks").glob("*"), reverse=True) + [share / "hooks"]:
+        _remove_empty(directory)
+    # main() has refused a src that is not ours before it gets here.
+    if os.path.lexists(SOURCE_DIR) and ownership()[0] == "ours":
+        _delete(SOURCE_DIR)
+    kept += _children(share)
+    _remove_empty(share)
+    for child in _children(RECORD_PATH.parent):
+        _delete(child)
+    _remove_empty(RECORD_PATH.parent)
+    # The status file lives in ~/.cache/omodachi, so it is written before that
+    # goes - otherwise the last act of a purge is to recreate it.
     status("done", "Removed the files Omodachi Host left behind.",
-           detail=", ".join(present) if present else "there was nothing left to remove")
-    for relative in present:
-        shutil.rmtree(HOME / relative, ignore_errors=True)
+           detail=("kept, because they are yours rather than the installer's: "
+                   + ", ".join(str(path) for path in kept)) if kept else "")
+    shutil.rmtree(HOME / ".cache/omodachi", ignore_errors=True)
     return 0
 
 
@@ -252,31 +326,211 @@ def pinned_commit(pin: dict) -> str:
     return (pin.get("commit") or "").strip().lower()
 
 
-def foreign_source() -> str:
-    """Why SOURCE_DIR is not ours to fetch into, or "" when it is.
+# RELEASE-8. Which ~/.local/share/omodachi/src this installer may replace,
+# clean or delete: only one it can show it made. When it makes a checkout it
+# writes a random id into that checkout's .git (ID_FILE) and the same id, with
+# the path, into RECORD_PATH, a 0600 file outside the tree. A directory there
+# is ours only when both agree. Anything else - a user's own repository, a
+# clone of omodachi-core at the very same commit, a copied tree, a file, a
+# link, even an empty directory - is described, left exactly as it is, and
+# nothing in it is run, renamed, cleaned or deleted.
+#
+# Why an id and not the directory's inode/device: on btrfs, Omarchy's default
+# filesystem, st_dev is an anonymous number handed out at mount time, and on
+# ext4 a directory deleted and made again can get the same inode back - so an
+# inode can call a user's fresh clone ours. Nothing but this file writes 128
+# random bits into a .git/ID_FILE; a checkout that is merely *like* ours never
+# has them. A process running as this same user can forge both halves, but it
+# could as well delete the directory itself: this is a guard against
+# accidents, not a security boundary. The boundary is still `verify_checkout`,
+# which decides what runs from the bytes in the tree, not from any record.
+RECORD_PATH = HOME / ".local/state/omodachi/core-source.json"
+LOCK_PATH = HOME / ".local/state/omodachi/install.lock"
+ID_FILE = "omodachi-install-id"
+# Where Install puts a checkout of ours that holds something the recorded
+# commit does not (a modified or extra file): moved aside, never deleted.
+# Outside ~/.local/share/omodachi on purpose, so no `--purge` reaches it.
+KEPT_DIR = HOME / ".local/share/omodachi-kept"
 
-    Ours means absent, an empty directory, or a git checkout that is a real
-    directory. Anything else - above all a developer's rsynced tree from
-    before this button could fetch one, or a link to their own clone, which a
-    forced checkout would rewrite - is somebody's files: never run, never
-    deleted, only named.
-    """
-    ours = not SOURCE_DIR.is_symlink() and (
-        not SOURCE_DIR.exists()
-        or (SOURCE_DIR.is_dir() and ((SOURCE_DIR / ".git").is_dir() or not any(SOURCE_DIR.iterdir()))))
-    if ours:
-        return ""
-    return (f"{SOURCE_DIR} exists but is not the checkout this installer makes. "
-            f"Move it away (or delete it) and press Install again. "
-            f"Developers: point ${SOURCE_ENV} at a git repository and ${COMMIT_ENV} "
-            f"at the commit to install.")
-
+# Installs made before RELEASE-8 have no record. Such a checkout is adopted only
+# if it is unmistakably what those installers made: a real .git whose HEAD is
+# detached at one of the commits they pinned, no branch or remote-tracking ref
+# (they only ever fetched a URL into FETCH_HEAD), a shallow list naming only
+# those commits (they always fetched --depth 1), one remote, `origin`, at the
+# public repository, and no modified tracked file. A clone of omodachi-core
+# has branches and full history, so it is never taken for one.
+EARLIER_PINS = frozenset({
+    "da63f8275d70d1c45ac72fb6b79dde21e529f6bf",  # v0.1.0
+    "7b0161953538358be6437c0d5f5f57e6e0eff07a",  # v0.1.1
+    "5e1474a7751aa40c235b1149ac42b5b11c08d18c",  # v0.1.2
+})
+EARLIER_ORIGINS = frozenset({"https://github.com/omodachi/omodachi-core.git",
+                             "https://github.com/omodachi/omodachi-core"})
 
 # RELEASE-7. Install never reuses what is in SOURCE_DIR: the pinned commit is
 # fetched into a new directory beside it, and only a complete checkout
 # replaces the old one. These are the names of those two transient
-# directories; one a killed run left behind is removed by the next run.
+# directories, each suffixed with an id the record lists under "pending"
+# while it exists; a run that was killed leaves one behind, and the next run
+# removes it - only a directory with exactly such a recorded name.
 FRESH_PREFIX, OLD_PREFIX = ".src-new-", ".src-old-"
+
+
+def _is_id(value) -> bool:
+    return (isinstance(value, str) and len(value) == 32
+            and all(character in "0123456789abcdef" for character in value))
+
+
+def _real_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
+def read_record() -> dict:
+    try:
+        record = json.loads(RECORD_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict) or record.get("path") != str(SOURCE_DIR):
+        return {}
+    record["pending"] = [value for value in record.get("pending") or [] if _is_id(value)]
+    return record
+
+
+def write_record(record: dict) -> None:
+    """Replace the record in one step, 0600 in a 0700 directory."""
+    record = {**record, "schema": 1, "path": str(SOURCE_DIR)}
+    if not record.get("id") and not record.get("pending"):
+        RECORD_PATH.unlink(missing_ok=True)
+        return
+    RECORD_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    write_file(RECORD_PATH, json.dumps(record, indent=1, sort_keys=True), 0o600)
+
+
+def _head_of(path: Path, size: int = 200) -> str:
+    """The start of a regular file (never a link, FIFO or device), or ""."""
+    try:
+        if path.is_symlink() or not path.is_file():
+            return ""
+        with path.open("rb") as handle:
+            return handle.read(size).decode("utf-8", "replace").strip()
+    except OSError:
+        return ""
+
+
+def _read_id(tree: Path) -> str:
+    return _head_of(tree / ".git" / ID_FILE, 64)
+
+
+def _write_id(tree: Path, value: str) -> None:
+    write_file(tree / ".git" / ID_FILE, value + "\n", 0o600)
+
+
+def _earlier_checkout() -> tuple[str, str]:
+    """(commit, "") if SOURCE_DIR is a checkout an installer before
+    RELEASE-8 made, else ("", why not). Reads files; runs git only once the
+    cheap signs agree, and then never with the checkout's own config."""
+    dot_git = SOURCE_DIR / ".git"
+    try:
+        head = _head_of(dot_git / "HEAD")
+        if head not in EARLIER_PINS:
+            return "", f"its HEAD is {head[:60] or 'unreadable'}, not one of the commits Omodachi pinned"
+        refs = [str(path.relative_to(dot_git)) for kind in ("heads", "remotes")
+                for path in (dot_git / "refs" / kind).rglob("*") if path.is_file()]
+        packed = dot_git / "packed-refs"
+        if packed.is_file() and not packed.is_symlink():
+            refs += [line.split()[-1] for line in packed.read_text().splitlines()
+                     if line.split() and line.split()[-1].startswith(("refs/heads/", "refs/remotes/"))]
+        if refs:
+            return "", f"it has branches ({', '.join(sorted(refs)[:3])}), which the installer never made"
+        shallow = dot_git / "shallow"
+        shallow_commits = (set(shallow.read_text().split())
+                           if shallow.is_file() and not shallow.is_symlink() else set())
+        if not shallow_commits or not shallow_commits <= EARLIER_PINS:
+            return "", "its history is not the single pinned commit the installer fetches"
+    except (OSError, ValueError) as error:
+        return "", f"it could not be read ({error})"
+    remotes = run(["git", *GIT_SAFE, "config", "--file", str(dot_git / "config"), "--no-includes",
+                   "--get-regexp", r"^remote\..*\.url$"], capture_output=True, text=True,
+                  env=git_environment())
+    urls = [line.split(" ", 1) for line in (remotes.stdout or "").splitlines()]
+    if len(urls) != 1 or urls[0][0] != "remote.origin.url" or urls[0][-1] not in EARLIER_ORIGINS:
+        return "", "its remote is not " + " or ".join(sorted(EARLIER_ORIGINS))
+    same, why = _inspect(SOURCE_DIR, head, untracked=False, clean=False)
+    if not same:
+        return "", why
+    return head, ""
+
+
+def ownership() -> tuple[str, str]:
+    """What SOURCE_DIR is: "absent", "ours" (the record's id is in its .git),
+    "earlier" (an install from before RELEASE-8, see _earlier_checkout), or
+    "foreign" with the reason. Changes nothing."""
+    if not os.path.lexists(SOURCE_DIR):
+        return "absent", ""
+    if not (_real_dir(SOURCE_DIR) and _real_dir(SOURCE_DIR / ".git")):
+        return "foreign", "it is not a git checkout"
+    record, found = read_record(), _read_id(SOURCE_DIR)
+    if found and (found == record.get("id") or found in record.get("pending", [])):
+        return "ours", ""
+    commit, why = _earlier_checkout()
+    if commit:
+        return "earlier", commit
+    if not found:
+        reason = "there is no record of this installer making it"
+    else:
+        reason = f"its id does not match the record in {RECORD_PATH}"
+    return "foreign", f"{reason}, and {why}"
+
+
+def describe_source() -> str:
+    try:
+        if SOURCE_DIR.is_symlink():
+            return f"a symbolic link to {os.readlink(SOURCE_DIR)}"
+        if SOURCE_DIR.is_file():
+            return f"a file ({SOURCE_DIR.stat().st_size} bytes)"
+        if not SOURCE_DIR.is_dir():
+            return "something that is neither a file nor a directory"
+        entries = sum(1 for _ in SOURCE_DIR.iterdir())
+        if (SOURCE_DIR / ".git").is_dir():
+            head = _head_of(SOURCE_DIR / ".git/HEAD", 80) or "unreadable"
+            return f"a git repository (HEAD: {head}; {entries} entries at the top)"
+        if (SOURCE_DIR / ".git").exists():
+            return "a git work tree whose .git is a file (a worktree or submodule)"
+        return f"a directory with {entries} entries, not a git checkout" if entries else "an empty directory"
+    except OSError as error:
+        return f"something that could not be read ({error})"
+
+
+def foreign_message(why: str) -> str:
+    aside = HOME / "omodachi-src-moved-aside"
+    return (f"{SOURCE_DIR} is {describe_source()}. It is not the checkout this installer makes: "
+            f"{why}. It was left exactly as it is - nothing in it was run, cleaned, moved or deleted. "
+            f"If it is yours, move it out of {SOURCE_DIR.parent}, for example\n"
+            f"        mv {shlex.quote(str(SOURCE_DIR))} {shlex.quote(str(aside))}\n"
+            f"    and press Install again. Developers: point ${SOURCE_ENV} at a git repository and "
+            f"${COMMIT_ENV} at the commit to install.")
+
+
+def claim_source() -> tuple[str, str]:
+    """ownership(), with an earlier install adopted: its checkout gets an id
+    and a record, and from then on is ours like any other. Returns
+    ("absent" | "ours", "") or ("foreign", the message to show)."""
+    kind, detail = ownership()
+    if kind == "foreign":
+        return kind, foreign_message(detail)
+    if kind == "earlier":
+        record = read_record()
+        identifier = secrets.token_hex(16)
+        try:
+            write_record({**record, "pending": [*record.get("pending", []), identifier]})
+            _write_id(SOURCE_DIR, identifier)
+            write_record({**record, "id": identifier, "commit": detail, "url": None, "adopted": True})
+        except OSError as error:
+            return "foreign", f"could not record {SOURCE_DIR} as this installer's: {error}"
+        print(f"{SOURCE_DIR} is the checkout an earlier Omodachi installer made at {detail}; "
+              f"recorded it as this installer's ({RECORD_PATH})", flush=True)
+        kind = "ours"
+    return kind, ""
 
 
 def _remove_tree(path: Path) -> None:
@@ -286,32 +540,59 @@ def _remove_tree(path: Path) -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def remove_leftovers() -> None:
+    """Remove what a killed run left: only `.src-new-<id>` / `.src-old-<id>`
+    directories whose id the record lists as pending."""
+    record = read_record()
+    if not record:
+        return
+    current, pending = _read_id(SOURCE_DIR), []
+    for identifier in record["pending"]:
+        paths = [SOURCE_DIR.parent / f"{prefix}{identifier}" for prefix in (FRESH_PREFIX, OLD_PREFIX)]
+        for path in paths:
+            if _real_dir(path):
+                shutil.rmtree(path, ignore_errors=True)
+        if identifier == current or any(os.path.lexists(path) for path in paths):
+            pending.append(identifier)
+    if pending != record["pending"]:
+        write_record({**record, "pending": pending})
+
+
 def fetch_source(pin: dict) -> tuple[bool, str]:
     """Fetch the pinned commit into a new checkout and put it at SOURCE_DIR.
 
     Nothing that was in SOURCE_DIR before is used - not its files, not its
-    bytecode, not its .git or that .git's config. A failure leaves SOURCE_DIR
-    exactly as it was (including an empty directory the user made).
+    bytecode, not its .git or that .git's config. What was there is replaced
+    only if it is ours; it is deleted only if it holds nothing but its
+    recorded commit and the build output that commit's .gitignore names, and
+    otherwise moved to KEPT_DIR. A failure leaves SOURCE_DIR exactly as it was.
     """
     url, ref, commit = pin["url"], pin["ref"], pinned_commit(pin)
     if not is_full_commit(commit):
         return False, (f"{SOURCE_PIN.name} pins no full 40-character commit for core "
                        f"(got {commit or 'nothing'}); set ${COMMIT_ENV} for a staging source")
-    refusal = foreign_source()
-    if refusal:
+    kind, refusal = claim_source()
+    if kind == "foreign":
         return False, refusal
     parent = SOURCE_DIR.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    for leftover in (*parent.glob(FRESH_PREFIX + "*"), *parent.glob(OLD_PREFIX + "*")):
-        _remove_tree(leftover)
-    fresh = Path(tempfile.mkdtemp(prefix=FRESH_PREFIX, dir=parent))
+    identifier = secrets.token_hex(16)
+    fresh = parent / f"{FRESH_PREFIX}{identifier}"
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        remove_leftovers()
+        prior = read_record()
+        write_record({**prior, "pending": [*prior.get("pending", []), identifier]})
+        fresh.mkdir(mode=0o700)
+    except OSError as error:
+        return False, f"could not prepare {parent}: {error}"
     try:
         # --template= : no hooks, excludes or config copied in from a template
-        # directory; this .git holds only what git itself writes.
+        # directory; this .git holds only what git itself writes, and our id.
         result = run(["git", "init", "--quiet", "--template=", str(fresh)],
                      capture_output=True, text=True, env=git_environment())
         ok, detail = (result.returncode == 0, _error(result))
         if ok:
+            _write_id(fresh, identifier)
             # `origin` for whoever looks at the checkout later; every fetch
             # names the URL itself, so a changed pin never reads a stale remote.
             _git("remote", "add", "origin", url, repo=fresh)
@@ -320,44 +601,76 @@ def fetch_source(pin: dict) -> tuple[bool, str]:
             ok, detail = _checkout_pinned(commit, fresh)
         if not ok:
             return False, detail
-        old = parent / f"{OLD_PREFIX}{os.getpid()}-{time.time_ns()}"
-        if SOURCE_DIR.exists():
-            SOURCE_DIR.rename(old)
-        try:
-            fresh.rename(SOURCE_DIR)
-        except OSError as error:
-            if old.exists():
-                old.rename(SOURCE_DIR)
-            return False, f"could not move the new checkout into place: {error}"
-        _remove_tree(old)
-        return True, ""
+        return _swap_in(fresh, identifier, commit, url)
+    except OSError as error:
+        return False, f"could not put the new checkout in place: {error}"
     finally:
         if fresh.exists():
             _remove_tree(fresh)
+        record = read_record()
+        if identifier in record.get("pending", []) and _read_id(SOURCE_DIR) != identifier:
+            try:
+                write_record({**record, "pending": [value for value in record["pending"]
+                                                    if value != identifier]})
+            except OSError:
+                pass  # a stale pending id names no directory; the next run drops it
 
 
-def verify_checkout(commit: str, *, clean: bool = True) -> tuple[bool, str]:
-    """The bytes about to run are the pinned commit's, and nothing else.
+def _swap_in(fresh: Path, identifier: str, commit: str, url: str) -> tuple[bool, str]:
+    prior = read_record()
+    aside, kept = None, None
+    if os.path.lexists(SOURCE_DIR):
+        # claim_source() said "ours"; ask again right here, where it counts.
+        if ownership()[0] != "ours":
+            return False, foreign_message(ownership()[1])
+        unchanged, why = _inspect(SOURCE_DIR, prior.get("commit") or "", untracked=True, clean=False)
+        if unchanged and _is_id(prior.get("id")) and _read_id(SOURCE_DIR) == prior["id"]:
+            aside = SOURCE_DIR.parent / f"{OLD_PREFIX}{prior['id']}"
+            write_record({**prior, "pending": [*prior["pending"], prior["id"]]})
+        else:
+            KEPT_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+            aside = kept = KEPT_DIR / f"src-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{identifier[:8]}"
+        try:
+            SOURCE_DIR.rename(aside)
+        except OSError as error:
+            return False, f"could not move the old checkout out of the way ({error}); nothing was changed"
+    try:
+        fresh.rename(SOURCE_DIR)
+    except OSError as error:
+        if aside is not None:
+            aside.rename(SOURCE_DIR)
+        return False, f"could not move the new checkout into place: {error}"
+    record = {key: value for key, value in read_record().items() if key != "adopted"}
+    write_record({**record, "id": identifier, "commit": commit, "url": url,
+                  "pending": [value for value in record.get("pending", []) if value != identifier]})
+    if kept is not None:
+        print(f"the previous {SOURCE_DIR} held something besides {prior.get('commit') or 'its commit'} "
+              f"({why}); it was moved to {kept}, not deleted", flush=True)
+    elif aside is not None:
+        _remove_tree(aside)
+        remove_leftovers()
+    return True, ""
 
-    Called immediately before this script executes anything from SOURCE_DIR,
-    install and uninstall alike. RELEASE-7: first every ignored and untracked
-    file goes (`git clean -ffdx`: __pycache__, *.pyc, build/, anything else),
-    then the work tree must equal the pinned commit's tree exactly, ignored
-    files included - so a file that could not be deleted fails the check.
 
-    All of it runs in a scratch repository made for this call, with SOURCE_DIR
-    as its work tree. The checkout's own .git is only a place the pinned
-    commit's objects are fetched from (by `git upload-pack`, which git runs
-    safely in repositories it does not trust, and every object arrives checked
-    against its hash); its config, hooks, attributes, excludes and index are
-    never read.
+def _inspect(tree: Path, commit: str, *, untracked: bool, clean: bool) -> tuple[bool, str]:
+    """Whether `tree` is `commit`, compared in a scratch repository.
+
+    The scratch repository has `tree` as its work tree; the tree's own .git
+    is only a place the commit's objects are fetched from (by `git
+    upload-pack`, which git runs safely in repositories it does not trust,
+    and every object arrives checked against its hash). Its config, hooks,
+    attributes, excludes and index are never read.
+
+    Always: HEAD is `commit` and no tracked file is modified. `untracked`:
+    no file outside the commit, except what the commit's own top-level
+    .gitignore names (build output) - judged by that file alone, so neither a
+    .gitignore added to the tree nor the user's global excludes can hide
+    anything. `clean`: then delete those ignored files (`git clean -fdx`; a
+    nested repository is never deleted) and require that nothing at all is
+    left besides the commit.
     """
-    commit = (commit or "").strip().lower()
     if not is_full_commit(commit):
-        return False, f"no full 40-character commit is pinned (got {commit or 'nothing'})"
-    # Nothing is cleaned in a directory that is not this installer's checkout.
-    if foreign_source() or SOURCE_DIR.is_symlink() or not (SOURCE_DIR / ".git").is_dir():
-        return False, f"{SOURCE_DIR} is not a git checkout this installer made"
+        return False, "there is no recorded commit to compare it with"
     with tempfile.TemporaryDirectory(prefix="omodachi-verify-") as scratch:
         repository = Path(scratch) / "git"
         environment = git_environment()
@@ -367,27 +680,62 @@ def verify_checkout(commit: str, *, clean: bool = True) -> tuple[bool, str]:
             return False, f"could not make a scratch repository to check with: {_error(created)}"
 
         def git(*arguments):
-            return run(["git", *GIT_SAFE, f"--git-dir={repository}", f"--work-tree={SOURCE_DIR}",
+            return run(["git", *GIT_SAFE, f"--git-dir={repository}", f"--work-tree={tree}",
                         *arguments], capture_output=True, text=True, env=environment)
 
-        fetched = git("fetch", "--quiet", "--no-tags", "--depth", "1", str(SOURCE_DIR / ".git"), "HEAD")
+        def listed(lines):
+            shown = "; ".join(line.strip() for line in lines[:5])
+            return shown + (f" (and {len(lines) - 5} more)" if len(lines) > 5 else "")
+
+        fetched = git("fetch", "--quiet", "--no-tags", "--depth", "1", str(tree / ".git"), "HEAD")
         got = (git("rev-parse", "--verify", "FETCH_HEAD^{commit}").stdout or "").strip() \
             if fetched.returncode == 0 else ""
         if got != commit:
-            return False, f"{SOURCE_DIR} is at {got or 'no commit'}, but the pin is {commit}"
+            return False, f"{tree} is at {got or 'no commit'}, but the pin is {commit}"
         for step in (("update-ref", "--no-deref", "HEAD", commit), ("read-tree", commit)):
             result = git(*step)
             if result.returncode != 0:
                 return False, f"could not load {commit} to check against: {_error(result)}"
+        tracked = git("status", "--porcelain", "--untracked-files=no")
+        lines = (tracked.stdout or "").splitlines()
+        if tracked.returncode != 0 or lines:
+            return False, f"{tree} has modified files: {listed(lines) or _error(tracked) or 'git failed'}"
+        if untracked:
+            ignore = Path(scratch) / "pinned-gitignore"
+            pinned = git("cat-file", "blob", f"{commit}:.gitignore")
+            ignore.write_text(pinned.stdout if pinned.returncode == 0 else "")
+            others = git("ls-files", "--others", "-z", f"--exclude-from={ignore}")
+            names = [name for name in (others.stdout or "").split("\0") if name]
+            if others.returncode != 0 or names:
+                return False, (f"{tree} has files that are not part of {commit[:12]}: "
+                               f"{listed(names) or _error(others) or 'git failed'}")
         if clean:
-            git("clean", "-ffdxq")
-        state = git("status", "--porcelain", "--ignored=matching", "--untracked-files=all")
-        lines = (state.stdout or "").splitlines()
-        if state.returncode != 0 or lines:
-            shown = "; ".join(line.strip() for line in lines[:5]) or _error(state) or "git failed"
-            more = f" (and {len(lines) - 5} more)" if len(lines) > 5 else ""
-            return False, f"{SOURCE_DIR} has modified, extra or undeletable files: {shown}{more}"
+            git("clean", "-fdxq")
+            state = git("status", "--porcelain", "--ignored=matching", "--untracked-files=all")
+            lines = (state.stdout or "").splitlines()
+            if state.returncode != 0 or lines:
+                return False, (f"{tree} has modified, extra or undeletable files: "
+                               f"{listed(lines) or _error(state) or 'git failed'}")
     return True, ""
+
+
+def verify_checkout(commit: str, *, clean: bool = True) -> tuple[bool, str]:
+    """The bytes about to run are the pinned commit's, and nothing else.
+
+    Called immediately before this script executes anything from SOURCE_DIR,
+    install and uninstall alike. RELEASE-7: the ignored build output goes
+    first (__pycache__, *.pyc, build/ - what the pinned .gitignore names),
+    then the work tree must equal the pinned commit's tree exactly, ignored
+    files included, so a file that could not be deleted fails the check.
+    RELEASE-8: only in a checkout that is ours, and a file the pinned
+    .gitignore does not name is never deleted - it fails the check instead.
+    """
+    commit = (commit or "").strip().lower()
+    if not is_full_commit(commit):
+        return False, f"no full 40-character commit is pinned (got {commit or 'nothing'})"
+    if ownership()[0] != "ours":
+        return False, f"{SOURCE_DIR} is not a git checkout this installer made"
+    return _inspect(SOURCE_DIR, commit, untracked=True, clean=clean)
 
 
 # RELEASE-7. How core's installer is run. -I: no user site-packages (and so no
@@ -431,8 +779,10 @@ def main(argv=None) -> int:
                         help="uninstall Omodachi Host: units, virtualenv, desktop entry, "
                              "the managed Sunshine fork and the firewall rules")
     parser.add_argument("--purge", action="store_true",
-                        help="with --remove, also delete ~/.config/omodachi - the device "
-                             "secret, the host certificate and every pairing")
+                        help="with --remove, also delete the device secret, the host "
+                             "certificate, every pairing and the rest of the host's state; "
+                             "agent-workspace and the files you wrote in ~/.config/omodachi "
+                             "(omodachi-menu.jsonc, desktop-runtime.json) are kept")
     parser.add_argument("--source", help=f"override the pinned core source (or ${SOURCE_ENV})")
     parser.add_argument("--ref", help=f"override the pinned core ref (or ${REF_ENV})")
     parser.add_argument("--commit", help=f"override the pinned core commit (or ${COMMIT_ENV})")
@@ -446,6 +796,25 @@ def main(argv=None) -> int:
         return fail("Omodachi Host installs on the Omarchy computer itself.",
                     f"this is {sys.platform}")
     status("starting", "Omodachi Host installer")
+    # RELEASE-8: one Install or --remove at a time, so two runs never move
+    # the same checkout or rewrite the record under each other.
+    lock = -1
+    try:
+        LOCK_PATH.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        lock = os.open(LOCK_PATH, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        if lock >= 0:
+            os.close(lock)
+        return fail("Another Omodachi Host Install or removal is already running.",
+                    f"wait for it to finish ({LOCK_PATH}: {error})")
+    try:
+        return _locked_main(arguments, extra)
+    finally:
+        os.close(lock)
+
+
+def _locked_main(arguments, extra) -> int:
     status("checking")
     for tool in ("git", "python3"):
         if shutil.which(tool) is None:
@@ -463,6 +832,13 @@ def main(argv=None) -> int:
     installer = SOURCE_DIR / "scripts/install_host.py"
     if arguments.remove:
         status("removing")
+        # RELEASE-8: before anything else, and --purge included - a
+        # directory that is not ours is not cleaned, run or deleted.
+        kind, refusal = claim_source()
+        if kind == "foreign":
+            return fail("Something that is not this installer's checkout is where Omodachi Host "
+                        "installs from, so nothing was removed.", refusal)
+        remove_leftovers()
         if not installer.is_file():
             if arguments.purge:
                 # `--remove` deletes the sources, so a user who decides
@@ -478,19 +854,24 @@ def main(argv=None) -> int:
         if not ok:
             # Its uninstaller is a program like any other: an unverified
             # one does not run. `--purge` alone never runs it either.
-            return fail("The Omodachi Host source here is not the pinned commit, "
+            return fail("The Omodachi Host source here is not exactly the pinned commit, "
                         "so its uninstaller was not run.",
-                        f"{detail}. Press Install first to bring it to the pinned commit and "
-                        f"remove again, or move {SOURCE_DIR} away (or delete it) and run "
-                        f"--remove --purge to delete the files Omodachi Host left behind.")
+                        f"{detail}. Press Install first to bring it to "
+                        f"the pinned commit (a checkout holding anything else is moved to "
+                        f"{KEPT_DIR}, not deleted) and remove again.")
         code = run_core(installer, ["--remove", *(["--purge"] if arguments.purge else [])])
+        if not os.path.lexists(SOURCE_DIR):
+            # core's uninstaller took the checkout with it: nothing is ours now.
+            record = read_record()
+            if record:
+                write_record({**record, "id": None, "commit": None, "url": None})
         if code != 0:
             return fail("The uninstaller reported an error.", f"exit {code}")
         status("done", "Omodachi Host removed.")
         return 0
 
-    refusal = foreign_source()
-    if refusal:
+    kind, refusal = claim_source()
+    if kind == "foreign":
         return fail("There is already something at the place Omodachi Host installs from.",
                     refusal)
     status("fetching", f"Fetching Omodachi Host from {pin['url']} "
