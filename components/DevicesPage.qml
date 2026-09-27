@@ -39,6 +39,8 @@ Item {
     }
 
     readonly property var pending: service ? service.pendingRequests : []
+    // RELEASE-9 (B2): SSH keys waiting for a local Approve.
+    readonly property var sshPending: service ? service.sshRequests : []
     // PAIR-3 §1.3: Sunshine certificate attempts waiting for a local Approve.
     readonly property var mediaApprovals: service ? service.mediaApprovals : []
 
@@ -82,7 +84,7 @@ Item {
                 }
                 Text {
                     width: parent.width
-                    text: Model.GRANT_LINE
+                    text: Model.grantLine(requestCard.modelData)
                     color: Color.foreground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
@@ -119,6 +121,72 @@ Item {
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
+                }
+                OmarchyUi.PanelSeparator { }
+            }
+        }
+
+        // --- SSH key requests (RELEASE-9) ---------------------------------
+        // A paired device that was not granted a terminal at pairing offered a
+        // key. Core refused it and holds it for ten minutes; this is where the
+        // person at the computer decides, instead of `omodachi-host ssh approve`.
+        OmarchyUi.PanelSectionHeader {
+            visible: root.sshPending.length > 0
+            text: root.sshPending.length === 1 ? "SSH KEY REQUEST" : "SSH KEY REQUESTS"
+        }
+        Repeater {
+            model: root.sshPending
+            delegate: Column {
+                id: sshCard
+                required property var modelData
+                width: content.width
+                spacing: Style.spacing.controlGap
+
+                Text {
+                    width: parent.width
+                    text: "\u201c" + sshCard.modelData.device_name + "\u201d wants an SSH login"
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.subtitle
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                }
+                Text {
+                    width: parent.width
+                    text: sshCard.modelData.device_id + " · " + sshCard.modelData.short_fingerprint
+                    color: Color.muted
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WrapAnywhere
+                    textFormat: Text.PlainText
+                }
+                Text {
+                    width: parent.width
+                    text: Model.SSH_GRANT_LINE
+                    color: Color.foreground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                }
+                Row {
+                    spacing: Style.spacing.controlGap
+                    OmarchyUi.Button {
+                        text: root.service && root.service.adminOperation === "ssh_approve"
+                            && root.service.adminTarget === sshCard.modelData.device_id ? "Approving…" : "Approve"
+                        selected: true
+                        focusable: true
+                        enabled: !!root.service && !root.service.adminBusy
+                        onActiveFocusChanged: if (activeFocus) root.focusRequested(this)
+                        onClicked: root.service.approveSsh(sshCard.modelData.device_id)
+                    }
+                    OmarchyUi.Button {
+                        text: "Reject"
+                        focusable: true
+                        enabled: !!root.service && !root.service.adminBusy
+                        onActiveFocusChanged: if (activeFocus) root.focusRequested(this)
+                        onClicked: root.service.rejectSsh(sshCard.modelData.device_id)
+                    }
                 }
                 OmarchyUi.PanelSeparator { }
             }

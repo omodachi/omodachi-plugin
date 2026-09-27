@@ -1,9 +1,9 @@
 {
-  "_comment": "Where the panel's Install button gets omodachi-core. One owner, one repository, one ref and the full commit that ref names; the bootstrap fetches the commit and checks it out detached, and refuses a ref whose commit differs. $OMODACHI_CORE_SOURCE, $OMODACHI_CORE_REF and $OMODACHI_CORE_COMMIT override them for a staging host.",
+  "_comment": "Where the panel's Install button gets omodachi-core. One owner, one repository, one ref and the full commit that ref names; the bootstrap fetches the commit and checks it out detached, and refuses a ref whose commit differs. Only with an explicit --staging do $OMODACHI_CORE_SOURCE, $OMODACHI_CORE_REF and $OMODACHI_CORE_COMMIT (or --source/--ref/--commit) replace them, with a banner saying it is not the pinned core; the panel never passes --staging.",
   "core_source": {
     "owner": "omodachi",
     "repository": "omodachi-core",
-    "ref": "v0.1.3",
-    "commit": "3fe5a99e8c8860ea06e05ea0dc770cc43ddca86d"
+    "ref": "v0.1.4",
+    "commit": "5e737ad7e87ae0a2b7b80d9d9f7c5110766afe46"
   }
 }

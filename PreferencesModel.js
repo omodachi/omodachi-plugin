@@ -125,6 +125,12 @@ function parse(raw) {
     // Without a readable profile there is nothing to describe, so the row that
     // describes it is not offered either.
     if (!readable) runtimeClean.profile_defaults = false
+    // RELEASE-9: the root PAM step. "current" is the helper that verifies every
+    // approval itself; "outdated" is one from before that, which trusts the
+    // host service's word; "absent" is a machine without it; "unknown" is a
+    // core that does not say. Only "current" gets the switch.
+    runtimeClean.pam = typeof source.pam_installed !== "boolean" ? "unknown"
+        : !source.pam_installed ? "absent" : source.pam_current === true ? "current" : "outdated"
     return {ok: true, revision: result.revision, values: clean, runtime: runtimeClean,
         profile: readable ? {fps: quality.fps, bitrate_kbps: quality.bitrate_kbps} : {fps: PROFILE_FALLBACK.fps, bitrate_kbps: PROFILE_FALLBACK.bitrate_kbps}}
 }
@@ -137,6 +143,9 @@ function command(snapshot, key, value) {
     // something on that does not exist is the one failure mode a security
     // toggle cannot have.
     if (key === "biometric_auth" && snapshot.runtime.biometric_auth_supported !== true) return null
+    // RELEASE-9: and never turn it on where the verifying PAM helper is not
+    // installed. Turning it off is always allowed.
+    if (key === "biometric_auth" && value === true && snapshot.runtime.pam !== "current") return null
     // CLIP-1: same rule. A host that has never heard of the clipboard switch
     // must not be sent one — and `clipboard_supported` is deliberately *not*
     // checked here: a daemon outside a graphical session still stores the

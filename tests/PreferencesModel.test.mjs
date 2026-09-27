@@ -88,11 +88,22 @@ assert.equal(Object.keys(ctx.HOST_FLAGS).sort().join(','),'allow_dynamic_resolut
 assert.equal(parsed.values.biometric_auth,false);
 assert.equal(parsed.runtime.biometric_auth_supported,false);
 assert.equal(ctx.command(parsed,'biometric_auth',true),null);
-const withAuth=ctx.parse(JSON.stringify({ok:true,result:{...value,values:{...value.values,biometric_auth:false}}}));
+const withAuth=ctx.parse(JSON.stringify({ok:true,result:{...value,values:{...value.values,biometric_auth:false},
+  runtime:{...value.runtime,pam_installed:true,pam_protocol:2,pam_current:true}}}));
 assert.equal(withAuth.ok,true);
 assert.equal(withAuth.runtime.biometric_auth_supported,true);
+assert.equal(withAuth.runtime.pam,'current');
 assert.equal(ctx.command(withAuth,'biometric_auth',true).join(' '),
     'omodachi-host preferences set --revision 3 --biometric-auth true');
+// RELEASE-9: no verifying PAM helper, no switch to turn on - but off always works.
+for (const [runtime, state] of [[{}, 'unknown'], [{pam_installed:false,pam_protocol:null,pam_current:false}, 'absent'],
+                                [{pam_installed:true,pam_protocol:1,pam_current:false}, 'outdated']]) {
+  const snapshot=ctx.parse(JSON.stringify({ok:true,result:{...value,values:{...value.values,biometric_auth:true},
+    runtime:{...value.runtime,...runtime}}}));
+  assert.equal(snapshot.runtime.pam,state);
+  assert.equal(ctx.command(snapshot,'biometric_auth',true),null);
+  assert.equal(ctx.command(snapshot,'biometric_auth',false).join(' '),'omodachi-host preferences set --revision 3 --biometric-auth false');
+}
 assert.equal(ctx.command(withAuth,'biometric_auth','yes'),null);
 // The host switch says nothing about any device: it is one of AUTH-1's two
 // switches and this page owns exactly that one.

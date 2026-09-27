@@ -641,6 +641,19 @@ function shortSshFingerprint(value) {
     if (typeof value !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(value)) return ""
     return "SHA256:" + value.slice(7, 19) + "…"
 }
+// RELEASE-9 (B4). The requester chose this name, and it is about to be a
+// notification title and the heading of the card someone approves from. Core
+// already cleans it; this does it again for an older core. Control and format
+// characters (newlines, bidi overrides, zero-width joiners) go, whitespace runs
+// become one space, and it stops at 48 characters. Emoji and accents stay.
+var NAME_LIMIT = 48
+function cleanName(value) {
+    if (typeof value !== "string" || value.length > 256) return ""
+    var text = value.replace(/[\t\n\v\f\r\u0085\u2028\u2029]/g, " ")
+        .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u206f\ufeff\ufff9-\ufffb]/g, "")
+        .replace(/\s+/g, " ").trim()
+    return Array.from(text).slice(0, NAME_LIMIT).join("").trim()
+}
 function pairRequests(result) {
     if (!isObject(result) || !Array.isArray(result.requests)) return null
     var rows = []
@@ -649,7 +662,7 @@ function pairRequests(result) {
         if (!isObject(row) || !/^pair_[0-9a-f]{32}$/.test(row.request_id)) continue
         if (typeof row.device_name !== "string" || !validDeviceId(row.device_id)) continue
         rows.push({request_id: row.request_id, device_id: row.device_id,
-            device_name: row.device_name,
+            device_name: cleanName(row.device_name) || "Unnamed device",
             status: typeof row.status === "string" ? row.status : "",
             // PAIR-2: with no invitation to vouch for it, where the request came
             // from is what tells "the iPad in my hand" from "something else on
@@ -662,7 +675,18 @@ function pairRequests(result) {
 
 // One line, the same on the card and in the notification, so what Approve gives
 // away is written down before it is pressed rather than after.
-var GRANT_LINE = "Approving grants: screen · terminal · agent"
+//
+// RELEASE-9 (B4): all of it. "screen · terminal · agent" left out that the
+// device also drives the keyboard and mouse, attaches to every Herdr session,
+// runs every Omarchy menu row (shutdown and remove among them) and - when the
+// request carries a key - gets an SSH login.
+var GRANT_LINE = "Approving grants: screen, keyboard and mouse · agent · Herdr sessions · every menu action, including power and remove"
+function grantLine(row) {
+    if (isObject(row) && row.ssh_fingerprint)
+        return "Approving grants: screen, keyboard and mouse · SSH login (" + row.ssh_fingerprint
+            + ") · agent · Herdr sessions · every menu action, including power and remove"
+    return GRANT_LINE
+}
 function requestDetail(row) {
     if (!isObject(row)) return ""
     var parts = [row.device_id]
@@ -672,8 +696,41 @@ function requestDetail(row) {
 }
 function requestNotification(row) {
     if (!isObject(row) || typeof row.device_name !== "string") return null
-    return {title: "\u201c" + row.device_name + "\u201d wants to connect",
-            body: requestDetail(row) + "\n" + GRANT_LINE}
+    return {title: "\u201c" + (cleanName(row.device_name) || "Unnamed device") + "\u201d wants to connect",
+            body: requestDetail(row) + "\n" + grantLine(row)}
+}
+
+// RELEASE-9 (B2). A paired device that was never granted a terminal offered an
+// SSH key; core holds it for ten minutes until the person here decides. Same
+// shape as a pairing request: who, which key, what Approve gives.
+function sshRequests(result) {
+    if (!isObject(result) || !Array.isArray(result.requests)) return null
+    var rows = []
+    for (var i = 0; i < result.requests.length && i < 64; i++) {
+        var row = result.requests[i]
+        if (!isObject(row) || !validDeviceId(row.device_id)) continue
+        if (typeof row.fingerprint !== "string" || !/^SHA256:[A-Za-z0-9+/]{43}$/.test(row.fingerprint)) continue
+        rows.push({device_id: row.device_id,
+            device_name: cleanName(row.device_name) || row.device_id,
+            fingerprint: row.fingerprint,
+            short_fingerprint: shortSshFingerprint(row.fingerprint),
+            expires_at: Number.isInteger(row.expires_at) ? row.expires_at : 0})
+    }
+    return rows
+}
+var SSH_GRANT_LINE = "Approving adds this key to ~/.ssh/authorized_keys: a terminal (pty) and nothing else - no forwarding - ending with the device's pairing."
+function sshRequestNotification(row) {
+    if (!isObject(row)) return null
+    return {title: "\u201c" + (cleanName(row.device_name) || row.device_id) + "\u201d wants an SSH login",
+            body: row.device_id + " · " + row.short_fingerprint + "\n" + SSH_GRANT_LINE}
+}
+function sshActionResult(operation, target, result) {
+    if (!isObject(result) || result.device_id !== target) return {ok: false}
+    if (operation === "ssh_approve")
+        return result.authorized === true ? {ok: true, message: "SSH login approved for " + target + "."} : {ok: false}
+    if (operation === "ssh_reject")
+        return result.authorized === false ? {ok: true, message: "SSH key rejected."} : {ok: false}
+    return {ok: false}
 }
 
 function connectionHelp(state) {

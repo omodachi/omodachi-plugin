@@ -43,14 +43,14 @@ omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
 Then open the Omodachi panel from the bar and press **Install** to put the host
 daemon on the computer.
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.3` tag of
-the host daemon.
+This is version **0.1.0** of the plugin, and it installs the `v0.1.4` tag of
+the host daemon, at the full commit `omodachi.json` pins.
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.3` names, the checkout is that
+carries the full 40-character commit that `v0.1.4` names, the checkout is that
 commit, detached, and any other commit is refused. Every Install fetches into a
 new directory, so nothing left in the old checkout is used. Right before it
 runs anything from that checkout, Install deletes the build output core's
@@ -76,22 +76,64 @@ deleted.
 installer downloads the prebuilt managed Sunshine fork from the Releases of
 [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) and checks
 it against the sha256 pinned in core's `data/versions.json` before unpacking it.
+It does not take over a Sunshine that something else set up on this computer:
+then Remote uses WayVNC and that Sunshine is left as it is.
+
+**Nothing else steers it.** The panel runs the bootstrap with no options. The
+bootstrap passes core's installer at most `--no-sunshine`, `--no-vnc` or
+`--no-firewall` (each installs less) and refuses every other option. The
+`OMODACHI_CORE_*` and `OMODACHI_SUNSHINE_*` variables and
+`--source`/`--ref`/`--commit` are honoured only with an explicit `--staging`, which prints that what it installs is not the
+pinned core (see Working on it).
+
+**What Install changes on this computer.**
+
+| Where | What |
+| --- | --- |
+| `~/.local/share/omodachi/` | `src/` (the checked core checkout), `venv/` built from it with hash-locked dependencies, `sunshine/<commit>/` (the managed Sunshine fork), `hooks/`, `agent-workspace/` (the agent's working directory) |
+| `~/.config/omodachi/` | the device secret, a self-signed certificate (`tls/`), the panel's own device credential `plugin.token` (0600), and a random login for Sunshine's web page that nobody knows (`sunshine-web-credentials.json`, 0600, never printed); the daemon keeps pairings and settings here |
+| `~/.config/systemd/user/` | `omodachid.service`, `omodachi-herdr.service` and the managed Sunshine's `app-dev.lizardbyte.app.Sunshine.service`, enabled and started |
+| `~/.local/bin/`, `~/.local/share/applications/` | the `omodachid`, `omodachi-host` and `omodachi-panel` commands and a desktop entry with its icon |
+| `~/.config/omarchy/` | the theme template `themed/omodachi-theme.json.tpl` and the `theme-set`/`font-set` hooks, installed with `omarchy hook install`; the current theme is re-applied headless so Omarchy renders the template |
+| `~/.config/sunshine/apps.json` | one app entry, only for a Sunshine it manages (the original kept as `apps.json.omodachi-bak`) |
+| ufw, with `sudo` | allow rules for `8099/tcp` and the Sunshine ports from `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and `tailscale0`; the installer then says whether ufw is active and actually filtering, or that those ports are reachable from every network |
+| pacman | Sunshine's runtime libraries and `wayvnc`, only those missing |
+| `~/.local/state/omodachi/`, `~/.cache/omodachi/` | the installers' records of what they made, Remote's session journals, the downloaded archive, this Install's status |
+
+Sunshine's web admin page (port 47990) answers this computer only and has that
+random login from the start, so no one can claim it by setting the first
+password. Once running, the daemon also writes one line per device you grant
+SSH to `~/.ssh/authorized_keys` (marked `# omodachi:<device>`, limited to a
+terminal with `restrict,pty` and expiring with the device's credential), points Voxtype at
+its own audio source while a device dictates and puts the original back after,
+and moves the Omarchy bar during a Remote session and back after it. Only if you
+run core's own installer with `--pam` does anything go into `/etc` (the opt-in
+device approval for password prompts, with a root-owned store of the device keys
+it accepts; see core's README).
 
 To remove it, take the host daemon back first, then the plugin:
 
 ```sh
-python3 ~/.config/omarchy/plugins/com.omodachi.host/tools/install_host.py --remove
+python3 -I -B ~/.config/omarchy/plugins/com.omodachi.host/tools/install_host.py --remove
 omarchy plugin remove com.omodachi.host
 ```
 
-`--remove` keeps this computer's pairings in `~/.config/omodachi`; add
-`--purge` to delete those too, with the rest of the host's state. Neither
-ever deletes your own files: `~/.local/share/omodachi/agent-workspace` (the
-agent's working directory), anything else you put under
-`~/.local/share/omodachi`, and the files you write in `~/.config/omodachi`
-(`omodachi-menu.jsonc`, `desktop-runtime.json`) are kept, and the uninstaller
-prints where they are. Removing only the plugin leaves the host daemon
-running.
+`--remove` takes back what Install made: the units, commands, desktop entry,
+venv, the managed Sunshine (disabling its unit only if Install enabled it, and
+deleting the clients it paired only if `~/.config/sunshine` was created for it),
+the `apps.json` entry, the Omarchy template and hooks, the ufw rules, every
+`authorized_keys` line marked as Omodachi's, and, if `--pam` was used, the PAM
+entry (it asks for your password in the terminal). If something that grants
+access cannot be removed it says the host was only partly removed and what to
+run, and exits 3. It keeps this computer's pairings in `~/.config/omodachi`;
+add `--purge` to delete those too, with the rest of the host's state - only the
+files Omodachi creates. Neither ever deletes your own files: anything you put
+in `~/.config/omodachi`, `~/.cache/omodachi` or `~/.local/state/omodachi`
+(such as `omodachi-menu.jsonc` or `desktop-runtime.json`),
+`~/.local/share/omodachi/agent-workspace` and anything else under
+`~/.local/share/omodachi` are kept, and the uninstaller prints where they are.
+A venv or Sunshine install it cannot show it made is kept too. Removing only
+the plugin leaves the host daemon running.
 
 **External dependencies.**
 
@@ -154,11 +196,15 @@ companion credential and, when the media bridge is up, the Sunshine certificate
 inside the same call. No PIN to copy, no Sunshine web page, no second approval.
 Removing a device is two inline clicks, not a modal.
 
-**Settings holds only what something consumes.** Core's preference store has
-exactly three keys, so Settings offers exactly three: dynamic-resolution
-permission, quality, host speaker. Remote's backend, placement and takeover bar
-edge are arguments of a single `omodachi-host remote start` call rather than
-stored defaults, so they are not shown here as if saving them did something.
+**Settings holds only what something consumes.** Settings shows the host
+preferences a person decides here: under Remote, dynamic-resolution permission,
+default quality and host speaker; under Security, whether a paired device may
+approve password prompts (it does nothing unless core's `--pam` step was run);
+under Clipboard, whether and which way the clipboard is shared. Core's store
+also keeps a few values the devices set (the voice uplink, the Remote backend,
+the pairing mode), which are not repeated here. Remote's placement and takeover
+bar edge are arguments of a single `omodachi-host remote start` call rather
+than stored defaults, so they are not shown here as if saving them did something.
 The two panel preferences, default page and click-while-open, are written to
 this widget's own entry in `shell.json` through `bar.shell.updateEntryInline`,
 and declared in `barWidget.schema` so the official settings UI can edit them
@@ -192,16 +238,18 @@ python3 scripts/deploy_plugin.py <host>        # content-addressed, no shell res
 ```
 
 To install your own core on a development host, commit it and point the
-installer at that repository and commit. It goes through the same fetch and the
-same check as a release; there is no way to run a copied tree, so do not rsync
-into `~/.local/share/omodachi/src` (Install refuses anything there that is not
-its own checkout, deletes the build output inside its own checkout before
-running it, and refuses a file there that is not build output):
+installer at that repository and commit, with `--staging`. It goes through the
+same fetch and the same check as a release; there is no way to run a copied
+tree, so do not rsync into `~/.local/share/omodachi/src` (Install refuses
+anything there that is not its own checkout, deletes the build output inside
+its own checkout before running it, and refuses a file there that is not build
+output). Without `--staging` these variables are ignored, and the panel never
+passes it:
 
 ```sh
 OMODACHI_CORE_SOURCE=file:///path/to/omodachi-core \
 OMODACHI_CORE_COMMIT=$(git -C /path/to/omodachi-core rev-parse HEAD) \
-  python3 tools/install_host.py              # or --source … --commit …
+  python3 -I -B tools/install_host.py --staging   # or --staging --source … --commit …
 ```
 
 On the computer:

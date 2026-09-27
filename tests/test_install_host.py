@@ -81,6 +81,7 @@ if probe:
                    "cwd": os.getcwd(), "cwd_listing": sorted(os.listdir(".")),
                    "path": sys.path, "script_dir": os.path.dirname(os.path.abspath(__file__)),
                    "env": {k: v for k, v in os.environ.items() if k.startswith("PYTHON")}}, out)
+sys.exit(int(os.environ.get("OMODACHI_TEST_EXIT", "0")))
 """
 
 # What a planted bytecode cache runs: it leaves a mark and changes the value.
@@ -218,13 +219,18 @@ class PinnedCommitTests(UpstreamCase):
         self.assertFalse(ok)
         self.assertEqual(self.head(), self.first)
 
-    def test_the_environment_overrides_the_pinned_commit(self):
+    def test_the_environment_overrides_the_pinned_commit_only_for_staging(self):
         self.write_pin(commit=self.first)
         os.environ["OMODACHI_CORE_COMMIT"] = self.second
         os.environ["OMODACHI_CORE_REF"] = "main"
+        # RELEASE-9: the session environment alone changes nothing.
         pin = self.module.source_pin()
+        self.assertEqual((pin["commit"], pin["ref"]), (self.first, "v0.1.0"))
+        pin = self.module.source_pin(staging=True)
         self.assertEqual((pin["commit"], pin["ref"]), (self.second, "main"))
-        ok, detail, _ = self.fetch()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ok, detail = self.module.fetch_source(pin)
         self.assertTrue(ok, detail)
         self.assertEqual(self.head(), self.second)
 
@@ -239,7 +245,7 @@ class PinnedCommitTests(UpstreamCase):
 
     def test_the_shipped_pin_carries_a_full_commit_beside_the_tag(self):
         pin = json.loads((ROOT / "omodachi.json").read_text())["core_source"]
-        self.assertEqual(pin["ref"], "v0.1.3")
+        self.assertEqual(pin["ref"], "v0.1.4")
         self.assertTrue(self.module.is_full_commit(pin.get("commit")), pin.get("commit"))
 
 
@@ -420,11 +426,69 @@ class ExecutionBindingTests(UpstreamCase):
         self.write_pin(commit=self.first)
         os.environ["OMODACHI_CORE_SOURCE"] = self.url
         os.environ["OMODACHI_CORE_COMMIT"] = self.second
-        code, out = self.main()
+        code, out = self.main("--staging")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.head(), self.second)
         self.assertIn(f"fetch --depth 1 {self.url} {self.second}", out)
         self.assertEqual(self.ran(), ["--local"])
+        self.assertEqual(out.count("which is NOT the omodachi-core this plugin pins"), 2)
+
+    # RELEASE-9 (review finding 10): what the panel's argv cannot say, nothing
+    # in the environment or on the command line says for it.
+    def test_the_environment_alone_never_replaces_the_pin(self):
+        self.write_pin(commit=self.first)
+        os.environ["OMODACHI_CORE_SOURCE"] = self.url
+        os.environ["OMODACHI_CORE_COMMIT"] = self.second
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.head(), self.first)
+        self.assertIn("ignoring $OMODACHI_CORE_SOURCE, $OMODACHI_CORE_COMMIT", out)
+        self.assertNotIn("STAGING", out)
+
+    def test_the_sunshine_overrides_reach_core_only_with_staging(self):
+        os.environ["OMODACHI_SUNSHINE_PACKAGE"] = "http://example.invalid/x.tar.zst"
+        os.environ["OMODACHI_SUNSHINE_SHA256"] = "a" * 64
+        self.assertNotIn("OMODACHI_SUNSHINE_PACKAGE", self.module.core_environment(Path("/b")))
+        self.assertNotIn("OMODACHI_SUNSHINE_SHA256", self.module.core_environment(Path("/b")))
+        self.assertEqual(self.module.core_environment(Path("/b"), staging=True)["OMODACHI_SUNSHINE_SHA256"],
+                         "a" * 64)
+        self.write_pin(commit=self.first)
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        self.assertIn("$OMODACHI_SUNSHINE_PACKAGE, $OMODACHI_SUNSHINE_SHA256", out)
+
+    def test_source_ref_or_commit_without_staging_is_refused_before_anything_runs(self):
+        self.write_pin(commit=self.first)
+        for flags in (["--source", self.url], ["--commit", self.second], ["--ref", "main"]):
+            with self.subTest(flags=flags):
+                code, out = self.main(*flags)
+                self.assertEqual(code, 1)
+                self.assertIn("only go with --staging", out)
+                self.assertNotIn("+ git", out)
+                self.assertFalse(self.source_dir.exists())
+
+    def test_only_options_that_install_less_reach_core(self):
+        self.write_pin(commit=self.first)
+        code, out = self.main("--no-sunshine", "--no-vnc")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.ran(), ["--local --no-sunshine --no-vnc"])
+        for flag in (["--pam"], ["--sunshine-build", "/tmp/x"], ["--sunshine-package", "/tmp/x.tar.zst"],
+                     ["--pam-services", "sudo,su"], ["--remove-pam"]):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as refused:
+                self.main(*flag)
+            self.assertEqual(refused.exception.code, 2)
+        self.assertEqual(self.ran(), ["--local --no-sunshine --no-vnc"])
+
+    def test_a_partial_removal_is_not_reported_as_removed(self):
+        self.install_first()
+        os.environ["OMODACHI_TEST_EXIT"] = "3"
+        self.addCleanup(os.environ.pop, "OMODACHI_TEST_EXIT", None)
+        code, out = self.main("--remove")
+        self.assertEqual(code, 3)
+        self.assertIn("only partly removed", out)
+        self.assertNotIn("Omodachi Host removed", out)
+        self.assertNotIn("Nothing was left half-installed", out)
 
 
 def plant_bytecode(module: Path, *, legacy: Path | None = None) -> Path:
@@ -984,21 +1048,130 @@ class OwnershipTests(UpstreamCase):
                 share / "my-scratch/keep.txt": "k\n",
                 home / ".config/omodachi/omodachi-menu.jsonc": "{}\n",
                 home / ".config/omodachi/omodachi-menu.jsonc.codex-bak": "{}\n",
-                home / ".config/omodachi/desktop-runtime.json": "{}\n"}
+                home / ".config/omodachi/desktop-runtime.json": "{}\n",
+                # RELEASE-9 (#8330, 2026-09-26): a file of the user's in every
+                # directory a purge goes through, beside files of ours.
+                home / ".config/omodachi/notes.txt": "mine\n",
+                home / ".config/omodachi/tls/my-ca.pem": "mine\n",
+                home / ".config/omodachi/pairing.json.bak": "mine\n",
+                home / ".cache/omodachi/my-cache.bin": "mine\n",
+                home / ".cache/omodachi/voice/memo.txt": "mine\n",
+                home / ".cache/omodachi/sunshine-src/mine.txt": "mine\n",
+                home / ".local/state/omodachi/notes.md": "mine\n",
+                home / ".local/state/omodachi/remote/my.log": "mine\n",
+                share / "venv/bin/python": "a venv core did not record\n"}
         state = [home / ".config/omodachi/device.secret", home / ".config/omodachi/tls/server.pem",
-                 home / ".cache/omodachi/sunshine-src/x", home / ".local/state/omodachi/remote/j",
-                 share / "venv/bin/python", share / "venv.previous/bin/python"]
+                 home / ".config/omodachi/agent/ws-token", home / ".config/omodachi/.pairing-ab12cd34",
+                 home / ".cache/omodachi/voice/transcript-0123456789abcdef.txt",
+                 home / ".cache/omodachi/sunshine/omodachi-sunshine-328d231-x86_64.tar.zst",
+                 home / ".local/state/omodachi/remote/OMODACHI-0123456789abcdef.json",
+                 home / ".local/state/omodachi/venv-ids.json",
+                 share / "venv.previous/bin/python"]
         for path, text in [*mine.items(), *((path, "x\n") for path in state)]:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text)
+        (share / "venv.previous" / self.module.VENV_ID_FILE).write_text("d" * 32 + "\n")
+        (home / self.module.VENV_RECORD).write_text(json.dumps({"schema": 1, "ids": ["d" * 32]}))
         code, out = self.main("--remove", "--purge")      # no installer left: purge_only
         self.assertEqual(code, 0, out)
         for path, text in mine.items():
             self.assertEqual(path.read_text(), text, path)
         for path in state:
             self.assertFalse(path.exists(), path)
-        self.assertIn(str(share / "agent-workspace"), out)
-        self.assertIn(str(home / ".config/omodachi/desktop-runtime.json"), out)
+        kept = out.split("kept, because they are yours rather than the installer's:")[1].split()
+        self.assertEqual(sorted(kept), sorted(str(path) for path in (
+            share / "agent-workspace", share / "my-scratch", share / "venv",
+            home / ".config/omodachi/omodachi-menu.jsonc",
+            home / ".config/omodachi/omodachi-menu.jsonc.codex-bak",
+            home / ".config/omodachi/desktop-runtime.json", home / ".config/omodachi/notes.txt",
+            home / ".config/omodachi/tls/my-ca.pem", home / ".config/omodachi/pairing.json.bak",
+            home / ".cache/omodachi/my-cache.bin", home / ".cache/omodachi/voice/memo.txt",
+            home / ".cache/omodachi/sunshine-src", home / ".local/state/omodachi/notes.md",
+            home / ".local/state/omodachi/remote/my.log")))
+        self.assertFalse((share / "venv.previous").exists())
+        self.assertFalse(self.module.STATUS_PATH.exists())
+        self.assertEqual(sorted(p.name for p in (home / ".config/omodachi/tls").iterdir()), ["my-ca.pem"])
+
+    def test_a_purge_with_nothing_of_the_users_leaves_nothing(self):
+        home = self.module.HOME
+        for path in (home / ".config/omodachi/device.secret", home / ".cache/omodachi/install-status.json",
+                     home / ".local/state/omodachi/install.lock"):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x\n")
+        code, out = self.main("--remove", "--purge")
+        self.assertEqual(code, 0, out)
+        for relative in (".config/omodachi", ".cache/omodachi", ".local/state/omodachi"):
+            self.assertFalse((home / relative).exists(), relative)
+
+    SSH_LINES = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIUSER me@laptop",
+                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPAD # omodachi:ipad-1",
+                 "restrict,pty ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPHONE # omodachi:iphone",
+                 "# ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOLD # omodachi:commented-out",
+                 "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIX # omodachi:not a device name"]
+
+    def test_removal_without_core_still_takes_back_the_ssh_lines(self):
+        keys = self.module.HOME / ".ssh/authorized_keys"
+        for flags in (("--remove",), ("--remove", "--purge")):
+            with self.subTest(flags=flags):
+                keys.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                keys.write_text("".join(line + "\n" for line in self.SSH_LINES))
+                code, out = self.main(*flags)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(keys.read_text().splitlines(),
+                                 [self.SSH_LINES[0], self.SSH_LINES[3], self.SSH_LINES[4]])
+                self.assertEqual(keys.stat().st_mode & 0o777, 0o600)
+                self.assertIn("removed 2 Omodachi line(s)", out)
+
+    def test_an_authorized_keys_link_is_not_followed_and_the_removal_is_partial(self):
+        victim = self.module.HOME / "victim"
+        victim.parent.mkdir(parents=True, exist_ok=True)
+        victim.write_text(self.SSH_LINES[1] + "\n")
+        (self.module.HOME / ".ssh").mkdir(mode=0o700, parents=True)
+        (self.module.HOME / ".ssh/authorized_keys").symlink_to(victim)
+        code, out = self.main("--remove", "--purge")
+        self.assertEqual(code, 3)
+        self.assertEqual(victim.read_text(), self.SSH_LINES[1] + "\n")
+
+    def test_removal_without_core_says_partial_while_a_pam_entry_is_installed(self):
+        with mock.patch.object(self.module, "pam_present", return_value=["/etc/pam.d/sudo"]):
+            code, out = self.main("--remove", "--purge")
+        self.assertEqual(code, 3)
+        self.assertIn("only partly removed", out)
+        self.assertIn("Press Install", out)
+
+    def test_a_partial_install_is_not_reported_as_installed(self):
+        self.write_pin(commit=self.first)
+        os.environ["OMODACHI_TEST_EXIT"] = "3"
+        self.addCleanup(os.environ.pop, "OMODACHI_TEST_EXIT", None)
+        code, out = self.main()
+        self.assertEqual(code, 3)
+        self.assertIn("only partly installed", out)
+        self.assertNotIn("[done]", out)
+
+    def test_the_ssh_rule_is_core_s_own(self):
+        core = Path(os.environ.get("OMODACHI_CORE_TREE") or ROOT.parent / "omodachi-core")
+        if not (core / "src/omodachi_core/ssh_keys.py").is_file():
+            self.skipTest("no omodachi-core checkout beside this one (set OMODACHI_CORE_TREE)")
+        spec = importlib.util.spec_from_file_location("core_ssh_keys", core / "src/omodachi_core/ssh_keys.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for line in self.SSH_LINES:
+            self.assertEqual(self.module._ssh_owner(line), module.AuthorizedKeys._owner(line), line)
+
+    def test_the_purge_list_is_core_s_own(self):
+        # Core's scripts/install_host.py keeps the same list for its own
+        # --purge; compare when a core checkout is at hand.
+        core = Path(os.environ.get("OMODACHI_CORE_TREE") or ROOT.parent / "omodachi-core")
+        script = core / "scripts/install_host.py"
+        if not script.is_file():
+            self.skipTest("no omodachi-core checkout beside this one (set OMODACHI_CORE_TREE)")
+        spec = importlib.util.spec_from_file_location("core_install_host", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(self.module.PURGE_RULES, module.PURGE_RULES)
+        self.assertEqual(self.module.VENV_RECORD, module.VENV_RECORD)
+        self.assertEqual(self.module.VENV_ID_FILE, module.VENV_ID_FILE)
+        self.assertEqual(self.module.PARTIAL, module.PARTIAL)
 
     # Installs made before RELEASE-8.
     def test_an_earlier_install_is_adopted_and_replaced(self):

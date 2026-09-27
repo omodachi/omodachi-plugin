@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CLI_SUBCOMMANDS = {
     "health", "state", "capabilities", "herdr", "catalog", "panel-summon", "plugin-watch",
     "plugin-action", "desktop-entry", "devices", "pair", "media-pairing", "preferences",
-    "remote", "workspace", "events",
+    "remote", "workspace", "events", "ssh",
 }
 # What a deploy or a package puts on a host, mirroring scripts/deploy_plugin.py
 # and scripts/package.py. Everything else in this tree is repository
@@ -179,6 +179,25 @@ class InstallBootstrapTests(unittest.TestCase):
         self.assertIn('"omarchy-launch-terminal", "python3", "-I", "-B",', argv)
         self.assertIn('Qt.resolvedUrl("tools/install_host.py")', argv)
         self.assertNotIn("service.installSource", argv)
+
+
+class ReadmeTests(unittest.TestCase):
+    """RELEASE-9: the README states the pin and the Settings page as they are."""
+
+    def test_every_core_tag_the_readme_names_is_the_pinned_one(self):
+        ref = json.loads((ROOT / "omodachi.json").read_text())["core_source"]["ref"]
+        named = set(re.findall(r"`(v\d+\.\d+\.\d+)`", (ROOT / "README.md").read_text()))
+        self.assertEqual(named, {ref})
+
+    def test_the_readme_does_not_count_settings_keys_that_no_longer_add_up(self):
+        self.assertNotIn("exactly three", (ROOT / "README.md").read_text())
+
+    def test_the_panel_passes_the_bootstrap_nothing(self):
+        # The argv is the interpreter, -I -B and the path; so no --staging, and
+        # no option core's installer takes, can come from the panel.
+        service = (ROOT / "Service.qml").read_text()
+        argv = service.split('terminalProcess.command = [', 1)[1].split("]", 1)[0]
+        self.assertNotIn("--", argv.replace('"-I", "-B"', ""))
 
 
 if __name__ == "__main__":

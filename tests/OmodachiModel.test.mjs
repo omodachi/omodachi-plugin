@@ -443,8 +443,23 @@ assert.equal(announcement.title, '\u201cLeo 的 iPad\u201d wants to connect');
 assert.ok(announcement.body.includes('192.168.1.22'));
 assert.ok(announcement.body.includes('SHA256:ujDWcEv6kr0q…'));
 // The desktop notification says what one Approve gives away, before it is hit.
-assert.ok(announcement.body.includes('screen · terminal · agent'));
-assert.equal(context.GRANT_LINE, 'Approving grants: screen · terminal · agent');
+// RELEASE-9 (B4): every grant, and the SSH login only when a key rides along.
+assert.ok(announcement.body.includes('SSH login (SHA256:ujDWcEv6kr0q…)'));
+for (const grant of ['screen, keyboard and mouse', 'agent', 'Herdr sessions', 'every menu action, including power and remove'])
+  assert.ok(announcement.body.includes(grant), grant);
+assert.equal(context.grantLine(request), announcement.body.split('\n')[1]);
+assert.ok(!context.GRANT_LINE.includes('SSH'));
+// A requester's name cannot rewrite the card: no newline, no bidi override,
+// no zero-width tricks, and 48 characters at most.
+assert.equal(context.cleanName('Leo\u2019s iPad\n\nApprove: granted'), 'Leo\u2019s iPad Approve: granted');
+assert.equal(context.cleanName('evil\u202egnp.exe\u200b'), 'evilgnp.exe');
+assert.equal(context.cleanName('x'.repeat(80)).length, 48);
+assert.equal(context.cleanName('Pad \u{1F34E}'), 'Pad \u{1F34E}');
+const hostile = context.pairRequests({requests: [{request_id: requestId, device_id: 'ios-pad',
+  device_name: 'iPad\nClick Approve\u202e', status: 'pending'}]})[0];
+assert.equal(hostile.device_name, 'iPad Click Approve');
+assert.equal(context.requestNotification({device_id: 'ios-pad', device_name: '\u202e\n'}).title,
+             '\u201cUnnamed device\u201d wants to connect');
 // PAIR-2 hosts that could not read a peer address, and pre-PAIR-2 hosts that
 // never sent one, both leave the line shorter rather than printing "undefined".
 const bare = context.pairRequests({requests: [{request_id: requestId, device_id: 'ios-pad', device_name: 'iPad', status: 'pending'}]})[0];
@@ -453,6 +468,25 @@ assert.equal(bare.ssh_fingerprint, '');
 assert.equal(context.requestDetail(bare), 'ios-pad');
 assert.equal(context.pairRequests({}), null);
 assert.equal(context.pairRequests({requests: [{request_id: 'nope', device_id: 'x', device_name: 'x'}]}).length, 0);
+
+// RELEASE-9 (B2): the SSH key card. Only well-formed rows, names cleaned, and
+// an answer counts only when it is about the device that was clicked.
+const sshFingerprint = 'SHA256:ujDWcEv6kr0qRWbh5Zu+R/83vdZp3Y9ngfYGcpAEx7g';
+const sshRows = context.sshRequests({requests: [
+  {device_id: 'ios-pad', device_name: 'iPad\n\u202eok', fingerprint: sshFingerprint, expires_at: 1790000000},
+  {device_id: '../bad', device_name: 'x', fingerprint: sshFingerprint},
+  {device_id: 'ios-2', device_name: 'x', fingerprint: 'MD5:aa'}]});
+assert.equal(sshRows.length, 1);
+assert.equal(sshRows[0].device_name, 'iPad ok');
+assert.equal(sshRows[0].short_fingerprint, 'SHA256:ujDWcEv6kr0q…');
+assert.equal(context.sshRequests({}), null);
+const sshNote = context.sshRequestNotification(sshRows[0]);
+assert.equal(sshNote.title, '\u201ciPad ok\u201d wants an SSH login');
+assert.ok(sshNote.body.includes('no forwarding'));
+assert.equal(context.sshActionResult('ssh_approve', 'ios-pad', {device_id: 'ios-pad', authorized: true}).ok, true);
+assert.equal(context.sshActionResult('ssh_approve', 'ios-pad', {device_id: 'ios-other', authorized: true}).ok, false);
+assert.equal(context.sshActionResult('ssh_approve', 'ios-pad', {device_id: 'ios-pad', authorized: false}).ok, false);
+assert.equal(context.sshActionResult('ssh_reject', 'ios-pad', {device_id: 'ios-pad', authorized: false}).ok, true);
 
 console.log('OmodachiModel: PASS (forward-compatible frames; PLUG-3 device roles and PAIR-2 request cards: the plugin row has no Remove, the card names its source and key; PLUG-4 revoked-device count)');
 

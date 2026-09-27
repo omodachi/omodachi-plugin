@@ -521,6 +521,10 @@ Item {
     readonly property bool adminBusy: adminProcess.running || adminOperation !== ""
     property var notifiedRequests: ({})
 
+    // RELEASE-9 (B2): SSH keys a paired device offered without a terminal grant.
+    property var sshRequests: []
+    property var notifiedSshRequests: ({})
+
     property var mediaRequests: []
     property bool mediaApiReady: false
     property string mediaError: ""
@@ -560,6 +564,16 @@ Item {
             id: mediaRequestsOutput
             waitForEnd: true
             onStreamFinished: service.consumeMediaRequests(mediaRequestsOutput.text)
+        }
+        stderr: StdioCollector { }
+    }
+    Process {
+        id: sshRequestsProcess
+        command: ["omodachi-host", "ssh", "pending"]
+        stdout: StdioCollector {
+            id: sshRequestsOutput
+            waitForEnd: true
+            onStreamFinished: service.consumeSshRequests(sshRequestsOutput.text)
         }
         stderr: StdioCollector { }
     }
@@ -604,6 +618,7 @@ Item {
         if (!devicesProcess.running) devicesProcess.running = true
         if (!requestsProcess.running) requestsProcess.running = true
         if (!mediaRequestsProcess.running) mediaRequestsProcess.running = true
+        if (!sshRequestsProcess.running) sshRequestsProcess.running = true
         if (service.panelInstance && service.panelInstance.page === "settings") service.refreshPreferences()
         service.refreshHostUnit()
     }
@@ -630,6 +645,37 @@ Item {
         service.requestsLoaded = true
         service.pairingError = ""
         service.announcePending()
+    }
+    // An older core has no `ssh pending`; that is an empty list, not an error.
+    function consumeSshRequests(raw) {
+        service.sshRequests = Model.sshRequests(service.reply(raw)) || []
+        var seen = {}
+        for (var i = 0; i < service.sshRequests.length; i++) {
+            var row = service.sshRequests[i], key = row.device_id + " " + row.fingerprint
+            seen[key] = true
+            if (service.notifiedSshRequests[key] || notifyProcess.running) continue
+            var text = Model.sshRequestNotification(row)
+            if (!text) continue
+            notifyProcess.command = ["omarchy-notification-send", "--app-name", "Omodachi",
+                "-u", "critical", "-t", "30000", text.title, text.body,
+                "--exec", "omarchy-shell", "shell", "summon", service.pluginId,
+                JSON.stringify({view: "devices"})]
+            notifyProcess.running = true
+        }
+        var kept = {}
+        for (var known in service.notifiedSshRequests) if (seen[known]) kept[known] = true
+        for (var fresh in seen) kept[fresh] = true
+        service.notifiedSshRequests = kept
+    }
+    function approveSsh(deviceId) {
+        if (service.adminBusy) return
+        if (!service.sshRequests.some(function(row) { return row.device_id === deviceId })) { service.refreshDevices(); return }
+        service.startAdmin("ssh_approve", deviceId, ["omodachi-host", "ssh", "approve", deviceId], null)
+    }
+    function rejectSsh(deviceId) {
+        if (service.adminBusy) return
+        if (!service.sshRequests.some(function(row) { return row.device_id === deviceId })) { service.refreshDevices(); return }
+        service.startAdmin("ssh_reject", deviceId, ["omodachi-host", "ssh", "reject", deviceId], null)
     }
     function consumeMediaRequests(raw) {
         var result = MediaPairing.parseLocalList(raw, Date.now())
@@ -756,7 +802,8 @@ Item {
             service.refreshDevices()
             return
         }
-        var outcome = MediaPairing.actionResult(operation, target, binding, result)
+        var outcome = operation.indexOf("ssh_") === 0 ? Model.sshActionResult(operation, target, result)
+            : MediaPairing.actionResult(operation, target, binding, result)
         if (outcome.grantRemote) {
             // The streaming half did not land. Remember which device and which
             // request, so its row can offer Grant Remote instead of the user

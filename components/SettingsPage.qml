@@ -113,9 +113,14 @@ Item {
         // the app on each device, so turning this on does not hand anything to
         // any device by itself - a device also has to register its own key and
         // keep its own switch on. Off is what a host ships with.
+        // RELEASE-9: only where the root PAM step is installed and is the
+        // helper that verifies every approval itself. Elsewhere the switch
+        // would do nothing (absent) or trust the host service's word
+        // (outdated), so the page says which, and what to run.
         OmarchyUi.Toggle {
             width: parent.width
             visible: root.hostReady && root.preferences.runtime.biometric_auth_supported
+                && root.preferences.runtime.pam === "current"
             label: "Approve password prompts from a paired device"
             description: "Let a paired device with Face ID or Touch ID answer this computer's sudo and permission prompts. The device has to turn it on too. Every failure - no device, no answer, or a refusal - goes back to the password."
             checked: root.hostReady && root.preferences.values.biometric_auth
@@ -125,7 +130,21 @@ Item {
         }
         Text {
             width: parent.width
-            visible: root.hostReady && !root.preferences.runtime.biometric_auth_supported
+            visible: root.hostReady && root.preferences.runtime.biometric_auth_supported
+                && (root.preferences.runtime.pam === "absent" || root.preferences.runtime.pam === "outdated")
+            text: root.hostReady && root.preferences.runtime.pam === "outdated"
+                ? "Device approval for password prompts is installed, but outdated — reinstall it. The installed helper trusts the host service's answer instead of checking the device's signature. In a terminal: python3 ~/.local/share/omodachi/src/scripts/install_host.py --local --pam (asks for your password)."
+                : "Device approval for password prompts is not installed on this computer. It is optional; to add it, run in a terminal: python3 ~/.local/share/omodachi/src/scripts/install_host.py --local --pam (asks for your password)."
+            color: root.hostReady && root.preferences.runtime.pam === "outdated" ? Color.accent : Color.muted
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+            textFormat: Text.PlainText
+        }
+        Text {
+            width: parent.width
+            visible: root.hostReady && (!root.preferences.runtime.biometric_auth_supported
+                || root.preferences.runtime.pam === "unknown")
             text: "This host does not offer device approval for password prompts. Update the Omodachi host service to use it."
             color: Color.muted
             font.family: Style.font.family

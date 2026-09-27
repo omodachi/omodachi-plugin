@@ -32,10 +32,20 @@ stage as the user watching the terminal, and a failure names itself in both
 places instead of scrolling past.
 
 Where core comes from is `omodachi.json` beside this plugin's manifest - one
-owner, one repository, one ref and the full 40-character commit that ref names
-- and $OMODACHI_CORE_SOURCE / $OMODACHI_CORE_REF / $OMODACHI_CORE_COMMIT
-override it, which is how a staging host installs from a private mirror
-without editing a pinned file.
+owner, one repository, one ref and the full 40-character commit that ref names.
+RELEASE-9: nothing else, unless this script is started with `--staging`: only
+then do $OMODACHI_CORE_SOURCE / $OMODACHI_CORE_REF / $OMODACHI_CORE_COMMIT (or
+--source / --ref / --commit) replace the pin - which is how a developer or a
+staging host installs its own core, through the same fetch and the same check -
+and a banner says, before anything is fetched and again at the end, that what
+is being installed is NOT the pinned core. The panel never passes --staging, so
+nothing in the session environment can change what its Install button runs.
+
+RELEASE-9: of core's installer options, this script passes on only
+--no-sunshine, --no-vnc and --no-firewall, each of which installs less; any
+other option is refused. Root steps (--pam) and unverified builds
+(--sunshine-build, --sunshine-package) are core's own options, run from core's
+checkout by a person who reads its README, never through this entry point.
 
 RELEASE-3b. What runs is the commit, not the tag: a tag can be moved after the
 plugin was reviewed, a commit cannot. The ref is kept for the one case a git
@@ -93,10 +103,12 @@ if __name__ == "__main__" and sys.executable and not (sys.flags.isolated and sys
 import argparse  # noqa: E402 - after the re-exec above, on purpose
 import fcntl  # noqa: E402
 import json  # noqa: E402
+import re  # noqa: E402
 import secrets  # noqa: E402
 import shlex  # noqa: E402
 from pathlib import Path  # noqa: E402
 import shutil  # noqa: E402
+import stat  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
@@ -157,15 +169,16 @@ def status(stage: str, message: str = "", *, detail: str = "") -> None:
           + (f"\n    {detail}" if detail else ""), flush=True)
 
 
-def fail(message: str, detail: str = "") -> int:
+def fail(message: str, detail: str = "", *, code: int = 1) -> int:
     status("failed", message, detail=detail)
-    print("\nNothing was left half-installed by this step. "
-          "Close this window, fix the above and press Install again.", flush=True)
-    return 1
+    if code == 1:
+        print("\nNothing was left half-installed by this step. "
+              "Close this window, fix the above and press Install again.", flush=True)
+    return code
 
 
-def source_pin() -> dict:
-    """Where core comes from: the pinned file, then the environment."""
+def source_pin(*, staging: bool = False) -> dict:
+    """Where core comes from: the pinned file; with --staging, then the environment."""
     value = {"owner": DEFAULT_OWNER, "repository": "omodachi-core", "ref": "main", "url": None,
              "commit": None}
     try:
@@ -177,10 +190,18 @@ def source_pin() -> dict:
         pass
     if not value["url"]:
         value["url"] = f"https://github.com/{value['owner']}/{value['repository']}.git"
-    value["url"] = os.environ.get(SOURCE_ENV) or value["url"]
-    value["ref"] = os.environ.get(REF_ENV) or value["ref"]
-    value["commit"] = os.environ.get(COMMIT_ENV) or value["commit"]
+    if staging:
+        value["url"] = os.environ.get(SOURCE_ENV) or value["url"]
+        value["ref"] = os.environ.get(REF_ENV) or value["ref"]
+        value["commit"] = os.environ.get(COMMIT_ENV) or value["commit"]
     return value
+
+
+def staging_banner(pin: dict, pinned: dict) -> str:
+    rule = "!" * 72
+    return (f"{rule}\n!! STAGING: this installs {pin['url']} at {pin.get('commit') or '?'},\n"
+            f"!! which is NOT the omodachi-core this plugin pins "
+            f"({pinned['url']} at {pinned.get('commit') or '?'}).\n{rule}")
 
 
 def is_full_commit(value) -> bool:
@@ -194,14 +215,87 @@ def run(argv, **kwargs):
 
 
 # What `--purge` takes when core's installer is already gone - the same rule
-# core's own --purge follows (RELEASE-8): what the installer and its daemon
-# made, never the user's own files. Kept: ~/.local/share/omodachi/agent-workspace
-# (the agent's working directory), anything else there nobody here made, and
-# the files a person writes in ~/.config/omodachi by hand (the menu layer, its
-# set-aside copies, desktop-runtime.json). src goes only if it is ours.
-SHARE_MADE = ("venv", "venv.previous")
-USER_CONFIG = ("omodachi-menu.jsonc", "desktop-runtime.json")
-USER_CONFIG_PREFIXES = ("omodachi-menu.jsonc.codex-bak",)
+# core's own --purge follows (RELEASE-9, core scripts/install_host.py
+# PURGE_RULES, which tests/test_install_host.py compares with this copy): in
+# ~/.config/omodachi, ~/.cache/omodachi and ~/.local/state/omodachi exactly the
+# files and directories Omodachi creates - each by its name or the exact
+# pattern of a name it generates (tempfile's random part is eight of
+# [a-z0-9_]) - and nothing else. Anything a person put there is kept and
+# printed. None is a file (or socket, or link - never followed); a dict is a
+# directory of ours, judged the same way inside and removed only if that
+# leaves it empty; a string is a directory removed whole only when that marker
+# file of ours is in it. In ~/.local/share/omodachi: a venv only when core's
+# record shows core made it (VENV_RECORD), the hook directories only when
+# empty, src only when it is ours; agent-workspace and everything else stay.
+SUNSHINE_BUILD_MARKER = ".git/omodachi-sunshine-build-cache"
+_TMP = "[a-z0-9_]{8}"
+PURGE_RULES = {
+    ".config/omodachi": {
+        r"device\.secret": None,
+        r"device\.credentials\.json": None,
+        r"device\.credentials\.json\.lock": None,
+        r"\.device\.credentials\.json\." + _TMP: None,
+        r"pairing\.json": None,
+        r"pairing\.json\.lock": None,
+        r"\.pairing-" + _TMP: None,
+        r"host-id": None,
+        r"herdr-sessions\.json": None,
+        r"herdr-sessions\.json\.lock": None,
+        r"\.herdr-sessions" + _TMP: None,
+        r"biometric-keys\.json": None,
+        r"biometric-keys\.json\.lock": None,
+        r"\.biometric-" + _TMP: None,
+        r"plugin\.token": None,
+        r"plugin\.token\.new": None,
+        r"owned-herdr-pane\.json": None,
+        r"agent-requests\.json": None,
+        r"agent-lifecycle\.lock": None,
+        r"\.agent-" + _TMP: None,
+        r"sunshine-web-credentials\.json": None,
+        r"media-pairing": {r"state\.json": None, r"state\.lock": None,
+                           r"\.media-pairing-" + _TMP: None},
+        r"preferences": {r"state\.json": None, r"state\.json\.lock": None,
+                         r"\.preferences-" + _TMP: None},
+        r"tls": {r"server\.pem": None, r"server\.key": None,
+                 r"\.server-" + _TMP + r"\.(pem|key)": None},
+        r"structured-default": {r"owner\.json": None, r"owner-" + _TMP: None,
+                                r"owner-before-empty-recovery-\d+\.json": None,
+                                r"delivery\.json": None, r"sequence\.json": None,
+                                r"\.agent-" + _TMP: None},
+        r"agent-handoff": {r"handoff_[0-9a-f]{32}\.json": None, r"\.agent-" + _TMP: None},
+        r"agent": {r"ws-token": None, r"ws-token-" + _TMP: None,
+                   r"endpoint\.json": None, r"endpoint-" + _TMP: None},
+    },
+    ".cache/omodachi": {
+        r"install-status\.json": None,
+        r"\.install-status\.json\.\d+\.tmp": None,
+        r"omodachid\.sock": None,
+        r"omodachid\.sock\.omodachi-new": None,
+        r"voice": {r"transcript-[0-9a-f]{16}\.txt(\.done)?": None},
+        r"sunshine": {r"omodachi-sunshine-[0-9a-f]{7,40}(-dirty)?-x86_64\.tar\.zst": None,
+                      r"omodachi-sunshine-x86_64\.tar\.zst": None, r"sunshine\.tar\.zst": None},
+        r"sunshine-src": SUNSHINE_BUILD_MARKER,
+    },
+    ".local/state/omodachi": {
+        r"remote": {
+            r"OMODACHI-[0-9a-f]{16}\.json": None,
+            r"\.remote-session-" + _TMP: None,
+            # rfb.sock: RELEASE-9 B3's private RFB listener, left behind only
+            # if the daemon died with a VNC session open.
+            r"vnc": {r"rs_[0-9a-f]{32}": {r"instance\.json": None, r"control\.sock": None,
+                                          r"rfb\.sock": None, r"last-error\.txt": None}},
+        },
+        r"desktop": {},
+        r"core-source\.json": None,
+        r"\.core-source\.json\.\d+\.tmp": None,
+        r"venv-ids\.json": None,
+        r"\.venv-ids\.json\.\d+\.tmp": None,
+        r"sunshine-unit\.json": None,
+        r"\.sunshine-unit\.json\." + _TMP: None,
+    },
+}
+VENV_RECORD = ".local/state/omodachi/venv-ids.json"
+VENV_ID_FILE = "omodachi-venv-id"
 
 
 def _delete(path: Path) -> None:
@@ -223,33 +317,142 @@ def _remove_empty(directory: Path) -> None:
         pass  # something in it is not ours
 
 
+def purge_directory(directory: Path, rules: dict, kept: list, *, spare=()) -> None:
+    """Delete what `rules` names under `directory`; list everything else in `kept`."""
+    if not _real_dir(directory):
+        if os.path.lexists(directory):
+            kept.append(directory)
+        return
+    for child in sorted(directory.iterdir()):
+        rule, known = None, False
+        for pattern, value in rules.items():
+            if re.fullmatch(pattern, child.name):
+                rule, known = value, True
+                break
+        if not known or child in spare:
+            kept.append(child)
+        elif rule is None:
+            if _real_dir(child):
+                kept.append(child)
+            else:
+                child.unlink(missing_ok=True)
+        elif isinstance(rule, str):
+            marker = child / rule
+            if _real_dir(child) and not marker.is_symlink() and marker.is_file():
+                shutil.rmtree(child, ignore_errors=True)
+            else:
+                kept.append(child)
+        elif _real_dir(child):
+            purge_directory(child, rule, kept, spare=spare)
+            _remove_empty(child)
+        else:
+            kept.append(child)
+
+
+def _core_made_venv(path: Path) -> bool:
+    """Core's record (RELEASE-9) names the id inside this venv."""
+    if not _real_dir(path):
+        return False
+    found = _head_of(path / VENV_ID_FILE, 64)
+    try:
+        ids = json.loads((HOME / VENV_RECORD).read_text()).get("ids") or []
+    except (OSError, ValueError, AttributeError):
+        return False
+    return _is_id(found) and found in ids
+
+
+# RELEASE-9. What shows core's opt-in PAM integration is on this computer (the
+# same files core's install_host.pam_present reads; all readable without root).
+PAM_FILES = ("/etc/omodachi/pam.conf", "/usr/local/bin/omodachi-pam", "/etc/tmpfiles.d/omodachi.conf",
+             "/etc/systemd/system/polkit-agent-helper@.service.d/60-omodachi.conf")
+PAM_SERVICES = ("sudo", "polkit-1", "hyprlock", "omarchy-lock-password", "su")
+
+
+def pam_present() -> list[str]:
+    found = [path for path in PAM_FILES if os.path.lexists(path)]
+    for service in PAM_SERVICES:
+        try:
+            text = Path("/etc/pam.d", service).read_text(errors="replace")
+        except OSError:
+            continue
+        if "omodachi-auth" in text or "omodachi-pam" in text:
+            found.append(f"/etc/pam.d/{service}")
+    return found
+
+
+# RELEASE-9. The authorized_keys lines Omodachi wrote - `<key> # omodachi:<device>`,
+# possibly behind options - and only those, the same rule as core's
+# ssh_keys.AuthorizedKeys._owner. Used when core's own uninstaller is gone
+# (it removes them itself otherwise), so that no removal of Omodachi leaves a
+# paired device able to log in.
+SSH_MARKER = "# omodachi:"
+SSH_DEVICE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
+
+
+def _ssh_owner(line: str) -> str | None:
+    index = line.find(SSH_MARKER)
+    if index < 0 or line.lstrip().startswith("#"):
+        return None
+    owner = line[index + len(SSH_MARKER):].strip()
+    return owner if SSH_DEVICE.fullmatch(owner) else None
+
+
+def remove_ssh_lines() -> tuple[list[str], str]:
+    """(devices whose lines were removed, error or "")."""
+    path = HOME / ".ssh/authorized_keys"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return [], ""
+    except OSError as error:
+        return [], f"{path} could not be read safely ({error})"
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            return [], f"{path} is not a regular file of this user"
+        raw = handle.read(1048577)
+    if len(raw) > 1048576:
+        return [], f"{path} is larger than 1 MiB"
+    try:
+        lines = raw.decode("utf-8").splitlines()
+    except UnicodeError:
+        return [], f"{path} is not UTF-8"
+    removed = [owner for owner in map(_ssh_owner, lines) if owner is not None]
+    if removed:
+        write_file(path, "".join(line + "\n" for line in lines if _ssh_owner(line) is None), 0o600)
+    return removed, ""
+
+
 def purge_only() -> int:
-    share, config = SOURCE_DIR.parent, HOME / ".config/omodachi"
-    kept = [child for child in _children(config)
-            if child.name in USER_CONFIG or child.name.startswith(USER_CONFIG_PREFIXES)]
-    for child in _children(config):
-        if child not in kept:
-            _delete(child)
-    _remove_empty(config)
-    for name in SHARE_MADE:
-        if os.path.lexists(share / name):
-            _delete(share / name)
+    share = SOURCE_DIR.parent
+    kept = []
+    for name in ("venv.previous", "venv"):
+        path = share / name
+        if _core_made_venv(path):
+            _delete(path)
+        elif os.path.lexists(path):
+            kept.append(path)
     for directory in sorted((share / "hooks").glob("*"), reverse=True) + [share / "hooks"]:
         _remove_empty(directory)
     # main() has refused a src that is not ours before it gets here.
     if os.path.lexists(SOURCE_DIR) and ownership()[0] == "ours":
         _delete(SOURCE_DIR)
-    kept += _children(share)
+    # The lock this run holds goes after it is released (main); the record
+    # stays while a checkout it names is still there.
+    spare = [LOCK_PATH] + ([RECORD_PATH] if os.path.lexists(SOURCE_DIR) else [])
+    # The status file lives in ~/.cache/omodachi; it is written first and then
+    # purged with the rest, so the last act of a purge does not recreate it.
+    status("done", "Removed the files Omodachi Host left behind.")
+    for relative, rules in PURGE_RULES.items():
+        before = len(kept)
+        purge_directory(HOME / relative, rules, kept, spare=spare)
+        _remove_empty(HOME / relative)
+        kept[before:] = [path for path in kept[before:] if path not in spare]
+    kept += [child for child in _children(share) if child != SOURCE_DIR and child not in kept]
     _remove_empty(share)
-    for child in _children(RECORD_PATH.parent):
-        _delete(child)
-    _remove_empty(RECORD_PATH.parent)
-    # The status file lives in ~/.cache/omodachi, so it is written before that
-    # goes - otherwise the last act of a purge is to recreate it.
-    status("done", "Removed the files Omodachi Host left behind.",
-           detail=("kept, because they are yours rather than the installer's: "
-                   + ", ".join(str(path) for path in kept)) if kept else "")
-    shutil.rmtree(HOME / ".cache/omodachi", ignore_errors=True)
+    if kept:
+        print("kept, because they are yours rather than the installer's:\n  "
+              + "\n  ".join(str(path) for path in kept), flush=True)
     return 0
 
 
@@ -344,6 +547,9 @@ def pinned_commit(pin: dict) -> str:
 # could as well delete the directory itself: this is a guard against
 # accidents, not a security boundary. The boundary is still `verify_checkout`,
 # which decides what runs from the bytes in the tree, not from any record.
+# core's scripts/install_host.py exits with this when it could not take back
+# something that grants access to this computer.
+PARTIAL = 3
 RECORD_PATH = HOME / ".local/state/omodachi/core-source.json"
 LOCK_PATH = HOME / ".local/state/omodachi/install.lock"
 ID_FILE = "omodachi-install-id"
@@ -570,7 +776,7 @@ def fetch_source(pin: dict) -> tuple[bool, str]:
     url, ref, commit = pin["url"], pin["ref"], pinned_commit(pin)
     if not is_full_commit(commit):
         return False, (f"{SOURCE_PIN.name} pins no full 40-character commit for core "
-                       f"(got {commit or 'nothing'}); set ${COMMIT_ENV} for a staging source")
+                       f"(got {commit or 'nothing'}); a staging source needs --staging and ${COMMIT_ENV}")
     kind, refusal = claim_source()
     if kind == "foreign":
         return False, refusal
@@ -753,44 +959,68 @@ def core_command(installer: Path, bytecode: Path, arguments) -> list[str]:
             "--local", *arguments]
 
 
-def core_environment(bytecode: Path) -> dict:
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")}
+# RELEASE-9: core's installer also reads these two (a Sunshine archive other
+# than the pinned one, and its sha256). Like OMODACHI_CORE_*, they reach it
+# from this script only with --staging.
+SUNSHINE_OVERRIDES = ("OMODACHI_SUNSHINE_PACKAGE", "OMODACHI_SUNSHINE_SHA256")
+
+
+def core_environment(bytecode: Path, *, staging: bool = False) -> dict:
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("PYTHON")
+                   and (staging or key not in SUNSHINE_OVERRIDES)}
     environment.update(PYTHONDONTWRITEBYTECODE="1", PYTHONPYCACHEPREFIX=str(bytecode),
                        PYTHONNOUSERSITE="1")
     return environment
 
 
-def run_core(installer: Path, arguments) -> int:
+def run_core(installer: Path, arguments, *, staging: bool = False) -> int:
     scratch = Path(tempfile.mkdtemp(prefix="omodachi-core-"))  # 0700
     try:
         bytecode, work = scratch / "bytecode", scratch / "cwd"
         bytecode.mkdir(mode=0o700)
         work.mkdir(mode=0o700)
-        return run(core_command(installer, bytecode, arguments), env=core_environment(bytecode),
+        return run(core_command(installer, bytecode, arguments),
+                   env=core_environment(bytecode, staging=staging),
                    cwd=str(work)).returncode
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+# RELEASE-9. The only core installer options this script passes on: each of
+# them installs less. Everything else core's installer takes - the root PAM
+# step, a Sunshine archive or build of the caller's choosing - is refused here.
+FORWARDED = ("--no-sunshine", "--no-vnc", "--no-firewall")
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--remove", action="store_true",
-                        help="uninstall Omodachi Host: units, virtualenv, desktop entry, "
-                             "the managed Sunshine fork and the firewall rules")
+                        help="uninstall Omodachi Host: what core's installer made, including "
+                             "the authorized_keys lines Omodachi wrote and, if it was "
+                             "installed, the PAM entry (asks for your password)")
     parser.add_argument("--purge", action="store_true",
                         help="with --remove, also delete the device secret, the host "
-                             "certificate, every pairing and the rest of the host's state; "
-                             "agent-workspace and the files you wrote in ~/.config/omodachi "
-                             "(omodachi-menu.jsonc, desktop-runtime.json) are kept")
-    parser.add_argument("--source", help=f"override the pinned core source (or ${SOURCE_ENV})")
-    parser.add_argument("--ref", help=f"override the pinned core ref (or ${REF_ENV})")
-    parser.add_argument("--commit", help=f"override the pinned core commit (or ${COMMIT_ENV})")
+                             "certificate, every pairing and the rest of the host's state - "
+                             "only the files Omodachi creates; anything else in "
+                             "~/.config/omodachi, ~/.cache/omodachi and ~/.local/state/omodachi, "
+                             "and agent-workspace, is kept and listed")
+    parser.add_argument("--staging", action="store_true",
+                        help=f"install a core other than the pinned one: honour ${SOURCE_ENV}, "
+                             f"${REF_ENV}, ${COMMIT_ENV} and --source/--ref/--commit (same fetch "
+                             f"and check, with a NOT-the-pinned-core banner)")
+    parser.add_argument("--source", help=f"with --staging: the core repository (or ${SOURCE_ENV})")
+    parser.add_argument("--ref", help=f"with --staging: the core ref (or ${REF_ENV})")
+    parser.add_argument("--commit", help=f"with --staging: the full core commit (or ${COMMIT_ENV})")
+    for flag in FORWARDED:
+        parser.add_argument(flag, action="store_true", help=f"passed to core's installer: {flag}")
     # Accepted and ignored: released plugins before INSTALL-1 ran this script
-    # with `--local --source <url>`, and an old panel must not hit an argparse
-    # error it cannot show anybody.
+    # with `--local`, and an old panel must not hit an argparse error it cannot
+    # show anybody. (Their `--source <url>` is refused since RELEASE-9: it would
+    # replace the pinned core, which only --staging may do.)
     parser.add_argument("--local", action="store_true", help=argparse.SUPPRESS)
-    arguments, extra = parser.parse_known_args(argv)
+    arguments = parser.parse_args(argv)
+    extra = [flag for flag in FORWARDED if getattr(arguments, flag[2:].replace("-", "_"))]
 
     if sys.platform != "linux":
         return fail("Omodachi Host installs on the Omarchy computer itself.",
@@ -809,9 +1039,15 @@ def main(argv=None) -> int:
         return fail("Another Omodachi Host Install or removal is already running.",
                     f"wait for it to finish ({LOCK_PATH}: {error})")
     try:
-        return _locked_main(arguments, extra)
+        code = _locked_main(arguments, extra)
     finally:
         os.close(lock)
+    if arguments.remove and arguments.purge and code == 0:
+        # The lock is this script's own file; a purge takes it last, once it
+        # is no longer held, and the directory with it if nothing else is there.
+        LOCK_PATH.unlink(missing_ok=True)
+        _remove_empty(LOCK_PATH.parent)
+    return code
 
 
 def _locked_main(arguments, extra) -> int:
@@ -821,13 +1057,25 @@ def _locked_main(arguments, extra) -> int:
             return fail(f"{tool} is not installed on this computer.",
                         f"install it first: sudo pacman -S --needed {tool}")
 
-    pin = source_pin()
-    if arguments.source:
-        pin["url"] = arguments.source
-    if arguments.ref:
-        pin["ref"] = arguments.ref
-    if arguments.commit:
-        pin["commit"] = arguments.commit
+    pinned = source_pin()
+    pin = source_pin(staging=arguments.staging)
+    overrides = [name for name in (SOURCE_ENV, REF_ENV, COMMIT_ENV, *SUNSHINE_OVERRIDES)
+                 if os.environ.get(name)]
+    if not arguments.staging:
+        if arguments.source or arguments.ref or arguments.commit:
+            return fail("--source, --ref and --commit only go with --staging.",
+                        "Without --staging this installs the core omodachi.json pins, and nothing else.")
+        if overrides:
+            print(f"ignoring ${', $'.join(overrides)}: without --staging this installs the core "
+                  f"{SOURCE_PIN.name} pins ({pinned['url']} at {pinned.get('commit')})", flush=True)
+    else:
+        if arguments.source:
+            pin["url"] = arguments.source
+        if arguments.ref:
+            pin["ref"] = arguments.ref
+        if arguments.commit:
+            pin["commit"] = arguments.commit
+        print(staging_banner(pin, pinned), flush=True)
 
     installer = SOURCE_DIR / "scripts/install_host.py"
     if arguments.remove:
@@ -840,12 +1088,33 @@ def _locked_main(arguments, extra) -> int:
                         "installs from, so nothing was removed.", refusal)
         remove_leftovers()
         if not installer.is_file():
+            # Core's uninstaller is gone (a --remove before this one took it).
+            # An older one did not take back the SSH lines, so they go here -
+            # and did not take back the PAM entry either, which needs core's
+            # root step: then the removal is partial, and says how to finish.
+            pam = pam_present()
+            if pam:
+                return fail("Omodachi Host was only partly removed: its device-approval PAM entry "
+                            "is still installed (" + ", ".join(pam) + ").",
+                            "Press Install (it fetches the pinned core again), then run this "
+                            "script with --remove in a terminal: it takes the PAM entry back, "
+                            "asking for your password.", code=PARTIAL)
+            devices, error = remove_ssh_lines()
+            if error:
+                return fail("Omodachi Host was only partly removed.",
+                            f"{error}; delete every line ending in '# omodachi:<device>' from it "
+                            f"yourself.", code=PARTIAL)
+            if devices:
+                print(f"removed {len(devices)} Omodachi line(s) from "
+                      f"{HOME / '.ssh/authorized_keys'} ({', '.join(devices)})", flush=True)
             if arguments.purge:
                 # `--remove` deletes the sources, so a user who decides
                 # afterwards that they also want their pairings gone has no
-                # installer left to ask. These four directories are the whole
-                # of what a purge takes, and they are this user's own.
+                # installer left to ask; this is the same purge core does.
                 return purge_only()
+            if devices:
+                status("done", "Removed the SSH access Omodachi Host had left behind.")
+                return 0
             return fail("Omodachi Host is not installed here.",
                         f"{installer} does not exist, so there is nothing to remove. "
                         f"Add --purge to delete the device secret, the certificate and the "
@@ -859,15 +1128,26 @@ def _locked_main(arguments, extra) -> int:
                         f"{detail}. Press Install first to bring it to "
                         f"the pinned commit (a checkout holding anything else is moved to "
                         f"{KEPT_DIR}, not deleted) and remove again.")
-        code = run_core(installer, ["--remove", *(["--purge"] if arguments.purge else [])])
+        code = run_core(installer, ["--remove", *(["--purge"] if arguments.purge else [])],
+                        staging=arguments.staging)
         if not os.path.lexists(SOURCE_DIR):
             # core's uninstaller took the checkout with it: nothing is ours now.
             record = read_record()
             if record:
                 write_record({**record, "id": None, "commit": None, "url": None})
+        if code == PARTIAL:
+            # RELEASE-9: something that grants access (the PAM entry, an
+            # authorized_keys line) is still there; core printed what and how.
+            return fail("Omodachi Host was only partly removed.",
+                        "The lines above say what is still installed and the command that "
+                        "removes it.", code=PARTIAL)
         if code != 0:
             return fail("The uninstaller reported an error.", f"exit {code}")
         status("done", "Omodachi Host removed.")
+        if arguments.purge:
+            # Nothing of ours is left behind by a purge, this status file included.
+            STATUS_PATH.unlink(missing_ok=True)
+            _remove_empty(STATUS_PATH.parent)
         return 0
 
     kind, refusal = claim_source()
@@ -890,10 +1170,17 @@ def _locked_main(arguments, extra) -> int:
                     detail)
 
     status("installing")
-    code = run_core(installer, extra)
+    code = run_core(installer, extra, staging=arguments.staging)
+    if code == PARTIAL:
+        # RELEASE-9: core installed, but something it found needs a root step
+        # (an outdated PAM helper); core printed what and the command.
+        return fail("Omodachi Host was only partly installed.",
+                    "The lines above say what is left to do and the command for it.", code=PARTIAL)
     if code != 0:
         return fail("The installer reported an error.",
                     f"exit {code}. The lines above say which step failed.")
+    if arguments.staging:
+        print(staging_banner(pin, pinned), flush=True)
     status("done")
     return 0
 
