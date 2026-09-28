@@ -52,8 +52,158 @@ OmarchyUi.BarWidget {
     onScopedServiceChanged: registerAnchor()
     onBarChanged: { widget.resolveService(); Qt.callLater(registerAnchor) }
     onSettingsChanged: if (scopedService && typeof scopedService.readUiSettings === "function") scopedService.readUiSettings(widget.settings)
-    Component.onCompleted: { widget.resolveService(); Qt.callLater(registerAnchor) }
-    Component.onDestruction: if (registeredService) registeredService.unregisterAnchor(widget)
+    Component.onCompleted: { widget.resolveService(); Qt.callLater(registerAnchor); Qt.callLater(widget.refreshSections) }
+    Component.onDestruction: {
+        widget.leaving = true
+        if (registeredService) registeredService.unregisterAnchor(widget)
+    }
+
+    // ---- REMOTE-SAFE-1: this screen's bar clears the device's corners -------
+    //
+    // A bar surface is built per monitor, so this widget is alive once per
+    // screen (shell/plugins/bar/Bar.qml `Variants { model: Quickshell.screens }`).
+    // The instance whose own window is on the session's OMODACHI output, in a
+    // live session of either mode (REMOTE-SAFE-1b: a takeover's output is the
+    // same device shape), moves that bar's two end sections inward by what core
+    // says the device's corners cover (`remote_bar.bar_insets`). Every other
+    // instance - every other screen - computes null and does nothing at all.
+    //
+    // How, and why not the window's `margins` (which the research suggested):
+    // Omarchy's popups assume the bar window starts at the screen edge.
+    // KeyboardPanel.cardOrigin and its click forwarding (`barPoint`) and
+    // Bar.windowScreenPoint all use bar-content coordinates as screen
+    // coordinates along the bar, so a shortened window would put every panel
+    // popped from this bar N px off its icon and send a click on one icon to
+    // the icon N px further along. Moving the end sections instead keeps the
+    // window, its exclusive zone and every coordinate the shell computes
+    // exactly as they are; only LeftModules' / RightModules' own margin
+    // (`Style.space(8)` in Bar.qml's verticalBar/horizontalBar) grows.
+    //
+    // Nothing is written: no shell.json, no shell IPC setter. Each override is
+    // a `Binding` with RestoreBindingOrValue, so when `when` goes false (the
+    // session ended or the value went to zero) the shell's own
+    // binding comes back, and when this widget or that screen goes away the
+    // Binding goes with it.
+    readonly property var hostWindow: widget.QsWindow.window
+    readonly property string screenName: hostWindow && hostWindow.screen ? String(hostWindow.screen.name || "") : ""
+    readonly property string barPosition: bar && typeof bar.position === "string" ? bar.position : ""
+    readonly property var cornerInsets: Model.barInsetsFor(scopedService ? scopedService.snapshot : null,
+                                                           screenName, barPosition)
+    readonly property int shellEndMargin: Style.space(8)
+    property Item leadingSection: null
+    property Item trailingSection: null
+    // A Binding that is destroyed while active does not give the shell its
+    // binding back (measured on the VM: taking this widget out of the bar in
+    // the middle of a session left both ends pushed in until the output went
+    // away). So the widget turns its Bindings off - which does restore - on
+    // the way out, before they are destroyed with it.
+    property bool leaving: false
+    readonly property bool applying: !leaving && !!cornerInsets
+
+    onCornerInsetsChanged: Qt.callLater(widget.refreshSections)
+    onHostWindowChanged: Qt.callLater(widget.refreshSections)
+
+    // contentItem -> Loader -> verticalBar/horizontalBar Item -> {CenterModules,
+    // LeftModules, RightModules}. The two ends are the ModuleLists that carry
+    // region "left"/"right" (Bar.qml `component LeftModules: ModuleList`); a
+    // ModuleSlot has `entry`, not `entries`, and the center lists say "center".
+    function barSections() {
+        var found = {leading: null, trailing: null}
+        var window = widget.QsWindow.window
+        var queue = window && window.contentItem ? [{item: window.contentItem, depth: 0}] : []
+        while (queue.length > 0) {
+            var next = queue.shift()
+            var kids = next.item.children || []
+            for (var i = 0; i < kids.length; i++) {
+                var child = kids[i]
+                if (!child) continue
+                if (child.entries !== undefined && child.region === "left") { if (!found.leading) found.leading = child }
+                else if (child.entries !== undefined && child.region === "right") { if (!found.trailing) found.trailing = child }
+                else if (next.depth < 3) queue.push({item: child, depth: next.depth + 1})
+            }
+        }
+        return found
+    }
+
+    function refreshSections() {
+        if (!widget.cornerInsets) {
+            widget.leadingSection = null
+            widget.trailingSection = null
+            return
+        }
+        var found = widget.barSections()
+        widget.leadingSection = found.leading
+        widget.trailingSection = found.trailing
+    }
+
+    Binding {
+        target: widget.leadingSection
+        property: "anchors.topMargin"
+        when: widget.applying && !!widget.leadingSection && widget.cornerInsets.vertical
+        value: Model.sectionMargin(widget.shellEndMargin, widget.cornerInsets ? widget.cornerInsets.leading : 0)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+    Binding {
+        target: widget.trailingSection
+        property: "anchors.bottomMargin"
+        when: widget.applying && !!widget.trailingSection && widget.cornerInsets.vertical
+        value: Model.sectionMargin(widget.shellEndMargin, widget.cornerInsets ? widget.cornerInsets.trailing : 0)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+    Binding {
+        target: widget.leadingSection
+        property: "anchors.leftMargin"
+        when: widget.applying && !!widget.leadingSection && !widget.cornerInsets.vertical
+        value: Model.sectionMargin(widget.shellEndMargin, widget.cornerInsets ? widget.cornerInsets.leading : 0)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+    Binding {
+        target: widget.trailingSection
+        property: "anchors.rightMargin"
+        when: widget.applying && !!widget.trailingSection && !widget.cornerInsets.vertical
+        value: Model.sectionMargin(widget.shellEndMargin, widget.cornerInsets ? widget.cornerInsets.trailing : 0)
+        restoreMode: Binding.RestoreBindingOrValue
+    }
+
+    // `omarchy-shell omodachi barGeometry` (Service.qml) asks every instance
+    // this. It is what core's bar_geometry reads the Omarchy logo from, so
+    // the App's mark (A-67) lands on the logo wherever the user put it -
+    // `center` included - and after the ends moved. Output-local logical px.
+    function logoSlot(root) {
+        var stack = root ? [root] : [], seen = 0
+        while (stack.length > 0 && seen < 4096) {
+            var item = stack.pop()
+            seen += 1
+            if (item.moduleName === "omarchy.menu" && item.activeItem !== undefined
+                && item.visible === true && item.width > 0 && item.height > 0) return item
+            var kids = item.children || []
+            for (var i = 0; i < kids.length; i++) if (kids[i]) stack.push(kids[i])
+        }
+        return null
+    }
+
+    function barReport() {
+        var window = widget.QsWindow.window
+        if (!window || !window.contentItem || !window.screen) return null
+        var screenSize = {width: window.screen.width, height: window.screen.height}
+        var windowSize = {width: window.width, height: window.height}
+        var logo = null, slot = widget.logoSlot(window.contentItem)
+        if (slot) {
+            var point = slot.mapToItem(window.contentItem, 0, 0)
+            logo = Model.outputRect({x: point.x, y: point.y, width: slot.width, height: slot.height},
+                                    widget.barPosition, screenSize, windowSize)
+        }
+        var applied = null
+        if (widget.cornerInsets) {
+            applied = {vertical: widget.cornerInsets.vertical,
+                       leading: widget.leadingSection ? Math.round(widget.cornerInsets.vertical
+                                ? widget.leadingSection.anchors.topMargin : widget.leadingSection.anchors.leftMargin) : null,
+                       trailing: widget.trailingSection ? Math.round(widget.cornerInsets.vertical
+                                ? widget.trailingSection.anchors.bottomMargin : widget.trailingSection.anchors.rightMargin) : null}
+        }
+        return {output: widget.screenName, position: widget.barPosition, screen: screenSize,
+                window: windowSize, insets: widget.cornerInsets, applied: applied, logo: logo}
+    }
 
     function registerAnchor() {
         if (registeredService && registeredService !== scopedService) registeredService.unregisterAnchor(widget)

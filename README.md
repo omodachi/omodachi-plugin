@@ -1,50 +1,167 @@
 # omodachi-plugin
 
-The Omarchy plugin of Omodachi: the bar icon, the panel and one-step device
-pairing that a desktop running [Omarchy](https://omarchy.org) draws for itself.
+**Use your iPhone or iPad with your Omarchy desktop:** an extra screen, or the
+whole desktop to drive by touch; the Omarchy menu and keybindings; your coding
+agent and herdr; an SSH terminal; your desktop notifications. This repository
+is the Omarchy plugin that sets it up on the computer.
 
-This repository **is** the plugin. `manifest.json` is at its root, which is
-what `omarchy plugin add` clones, validates and installs.
-
-<p>
-  <img src="https://omodachi.app/img/shots/vm-03-panel-ready.webp" width="400" alt="The Omodachi panel on a fresh Omarchy install, Overview, host connected and ready">
-  <img src="https://omodachi.app/img/shots/vm-05-devices-paired.webp" width="400" alt="The Devices page of the panel after one iPad was let in">
+<p align="center">
+  <img src="https://omodachi.app/img/shots/listing-preview.webp" width="800" alt="An Omarchy desktop with the Omodachi panel open, an iPad in landscape that has taken over the same desktop, and an iPhone showing the Omarchy menu">
 </p>
 
-<sub>A fresh Omarchy VM, installed from this repository. More at <a href="https://omodachi.app">omodachi.app</a>.</sub>
-
-## Where this sits
-
-Omodachi turns an iPhone or iPad into an extension of an Omarchy desktop. It
-ships as four repositories, plus the site.
-
-| Repository | What it is |
-| --- | --- |
-| **`omodachi-plugin`** | **this repository: the Omarchy plugin, a thin front end on the desktop** |
-| [`omodachi-core`](https://github.com/omodachi/omodachi-core) | the host daemon, where the weight of the system sits |
-| [`omodachi-ios`](https://github.com/omodachi/omodachi-ios) | the native iPhone and iPad app |
-| [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) | the Sunshine fork that drives the remote screen |
-| the site | **omodachi.app**. Its source is not published |
-
-This plugin is thin. Everything it knows comes from `omodachi-core`;
-everything it draws comes from Omarchy's own `qs.Ui` kit. There is no state
-here, no configuration file of our own, and no second copy of anything Omarchy
-already ships.
-
-`panel` · `service` · `bar-widget`. The bar icon, the Overview / Devices /
-Settings panel, one-step pairing, and starting or installing Host.
+[omodachi.app](https://omodachi.app) ·
+[Omarchy marketplace listing](https://plugins.omarchy.org/plugin.html?id=com.omodachi.host) ·
+iPhone and iPad app: in App Store review; build it yourself from
+[omodachi-ios](https://github.com/omodachi/omodachi-ios) ·
+[omodachi-core](https://github.com/omodachi/omodachi-core) (the host daemon) ·
+[omodachi-sunshine](https://github.com/omodachi/omodachi-sunshine) (the streaming server) ·
+[Security model](#security-model) ·
+[Report a vulnerability](SECURITY.md)
 
 ## Install
 
-```sh
-omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
-```
+1. Add the plugin and enable it:
 
-Then open the Omodachi panel from the bar and press **Install** to put the host
-daemon on the computer.
+   ```sh
+   omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
+   ```
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.5` tag of
-the host daemon, at the full commit `omodachi.json` pins.
+2. Click the Omodachi icon in the bar and press **Install…**. A terminal opens
+   and runs the installer, so every step is on screen. It asks for your
+   password only for `sudo`: to add firewall rules when ufw is installed, and
+   to install any of Sunshine's libraries or `wayvnc` that are missing, with
+   pacman. The panel says **Ready** when it is done.
+3. Open the Omodachi app on your iPhone or iPad, on the same network. Pick this
+   computer from the list, or add it by name or address, then press
+   **Approve** on the card that appears on the panel's **Devices** page and as
+   an Omarchy notification.
+
+**Requirements.** Omarchy 4 with its Quickshell shell (tested on the `omarchy`
+4.0.4 package), `python3` 3.11 or newer, `git` and `jq`; `sshd` running if you
+want the terminal, which Omodachi does not turn on. An iPhone or iPad on iOS 17
+or later. Remote streams through Sunshine when the computer has a working
+VA-API video encoder, and through WayVNC otherwise.
+
+**Updating.** Run `omarchy plugin update com.omodachi.host`, then
+`omarchy-restart-shell`: the running shell keeps the plugin version it loaded
+until it restarts.
+
+This is version **0.2.0** of the plugin, and it installs the `v0.1.5` tag of
+the host daemon, at the full commit `omodachi.json` pins. What Install changes,
+and how to take it all back, is under [Security model](#security-model) and
+[Remove](#remove).
+
+## What you get
+
+### Remote: Extra screen or Take over
+
+<p>
+  <img src="https://omodachi.app/img/shots/vm-08-takeover-ipad.webp" width="560" alt="An iPad in landscape that has taken over an Omarchy desktop: a terminal with fastfetch and btop, the Omodachi mark on the Omarchy logo at the top left">
+  <img src="https://omodachi.app/img/shots/vm-11-remote-iphone.webp" width="200" alt="An iPhone showing an extra Omarchy screen whose bar starts and ends clear of the phone's rounded corners">
+</p>
+
+**Extra screen** adds a new display to the desktop, beside the computer's own,
+and windows drag across. **Take over** moves every workspace to the device and
+turns the computer's own screen off until you end the session; everything is
+put back then. You can also lock the computer's keyboard and mouse for the
+session. It works on an iPhone as well as an iPad.
+
+Over Sunshine, touch drives the desktop: direct touch or a touchpad mode,
+two-finger scroll, a three-finger tap for the keyboard, and three-finger
+swipes that run the computer's own workspace keybindings. The picture is H.264,
+or HEVC when the computer's encoder and the device's hardware decoder both do
+it. When Sunshine cannot stream, for example on a computer without a VA-API
+encoder, Remote uses WayVNC instead, with a one-finger pointer and the
+keyboard.
+
+While a session runs, the Omarchy bar on the device's screen moves its two ends
+in, clear of the device's rounded corners, and the Omodachi mark drawn over the
+Omarchy logo brings the app's panel down over the picture.
+
+### The Omarchy menu and keybindings
+
+<img src="https://omodachi.app/img/shots/vm-09-takeover-panel-ipad.webp" width="560" alt="The app's panel over a Take over on an iPad: the computer's Omarchy menu on the left, its keybindings on the right">
+
+The app shows this computer's own Omarchy menu, with your additions from
+`~/.config/omarchy/extensions/omarchy-menu.jsonc`, its submenus, a search and
+the rows you pin, and the keybindings Omarchy defines, searchable. Tapping a row
+runs it on the computer. Rows that power off, remove, update or need root ask
+for a second tap before they run.
+
+### Your coding agent and herdr
+
+<img src="https://omodachi.app/img/shots/vm-13-herdr-ipad.webp" width="560" alt="The app's herdr panel on an iPad: the session's workspace and its three panes on the left, the selected pane on the right">
+
+The Agent panel talks to the coding agent that `omarchy-default-agent` names,
+running in the host's own herdr session: start it, send it a prompt, open its
+terminal. With Codex it is also a chat: the transcript, steer or interrupt,
+model and effort, slash commands, and Accept or Decline for what it asks to run.
+The herdr panel shows your herdr sessions, workspaces and panes. Watch any pane
+live, take control of one to type into it, split, zoom or close panes, and
+switch sessions.
+
+### SSH terminal
+
+<img src="https://omodachi.app/img/shots/vm-14-ssh-ipad.webp" width="560" alt="The app's SSH terminal on an iPad, running fastfetch on the computer">
+
+A terminal on the computer, with Esc, Ctrl, Alt, Tab and the arrows above the
+keyboard. The app makes its own Ed25519 key on the device and sends the public
+half with the pairing request. Approve adds it to `~/.ssh/authorized_keys` as
+one line limited to a terminal, which expires with the device's credential and
+goes when you remove the device.
+
+### Notifications
+
+<img src="https://omodachi.app/img/shots/vm-15-notifications-iphone.webp" width="220" alt="The app's notifications on an iPhone: three desktop notifications and two earlier pairing requests">
+
+What the Omarchy shell shows as a notification appears in the app while it is
+connected: in a list you can dismiss or clear, and as a toast inside the app.
+Do Not Disturb is one switch. There is no push service, so nothing arrives
+while the app is closed.
+
+### Pairing, and what a device may do
+
+<img src="https://omodachi.app/img/shots/vm-04-devices-request.webp" width="560" alt="The Devices page of the panel: a pairing request that lists everything Approve grants, above a paired iPad and its expiry date">
+
+The app finds the computer on the local network, or you add it by name or
+address. The request shows up on the panel's Devices page and as an Omarchy
+notification, with the device's name, where it connects from and its SSH key
+fingerprint, and it says what Approve grants: the screen, keyboard and mouse;
+an SSH login; the agent; herdr sessions; and every menu action, including power
+and remove. One Approve grants all of it, the Remote (Sunshine) certificate
+included, with no PIN and no Sunshine page. A device's credential lasts 30 days
+and the app renews it in its last week. **Remove** on the Devices page takes
+back the credential, the Sunshine certificate and the SSH line together.
+Pairing can also require an invitation:
+`omodachi-host preferences set --revision <n> --pairing-mode invite`, where
+`<n>` is the `revision` that `omodachi-host preferences get` prints.
+
+## Security model
+
+### Who can do what
+
+- **A paired device** can do what its pairing card listed, and that is a
+  lot: with the SSH login and every menu row it reaches about as far as you
+  do at the keyboard, as your user. It cannot answer a password prompt unless
+  you opt in (next point). **Remove** revokes all of it in one step.
+- **Password prompts** stay yours unless you opt in: only if core's installer
+  is run with `--pam` can a paired device approve a `sudo` or polkit prompt,
+  and then only with a device key kept in a root-owned store and checked by a
+  root helper. Typing the password keeps working. The plugin offers the switch
+  only where that helper is installed and current.
+- **SSH** lines Omodachi writes are `restrict,pty` (no forwarding of any kind)
+  with an `expiry-time`, and marked `# omodachi:<device>`; your own lines are
+  copied through untouched. A device without the SSH grant can only ask: its
+  key waits for a new Approve on the computer.
+- **The remote screen over VNC** is a WayVNC that listens only on a Unix socket
+  in a directory only you can open, reached through the host's authenticated
+  TLS connection; no VNC port is open.
+- **Rows that change the computer** (power, remove, update, anything run with
+  root) are refused on the first request and run only on a second one for the
+  same row from the same device within 30 seconds, and the app asks you to tap
+  twice.
+
+### What Install does
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
@@ -111,7 +228,26 @@ run core's own installer with `--pam` does anything go into `/etc` (the opt-in
 device approval for password prompts, with a root-owned store of the device keys
 it accepts; see core's README).
 
-To remove it, take the host daemon back first, then the plugin:
+**External dependencies.**
+
+- Omarchy 4.x with its Quickshell shell
+- `jq`
+- `python3` and `git`, for the Install button
+- [`omodachi-core`](https://github.com/omodachi/omodachi-core), the host
+  daemon, which Install fetches
+- the managed Sunshine fork package from
+  [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine), which
+  core's installer fetches
+
+Everything the plugin displays comes from `omodachi-core` over a user-owned
+Unix socket; with no host daemon the panel is one sentence and one button.
+
+A plugin runs unsandboxed inside the long-lived `omarchy-shell` process. Read
+the source before you enable it.
+
+## Remove
+
+Take the host daemon back first, then the plugin:
 
 ```sh
 python3 -I -B ~/.config/omarchy/plugins/com.omodachi.host/tools/install_host.py --remove
@@ -138,26 +274,26 @@ checkout it made - `src`, or core's Sunshine build cache
 was made for (a changed file, a file of yours, a commit of yours). Removing only
 the plugin leaves the host daemon running.
 
-**External dependencies.**
+## Where this sits
 
-- Omarchy 4.x with its Quickshell shell
-- `jq`
-- `python3` and `git`, for the Install button
-- [`omodachi-core`](https://github.com/omodachi/omodachi-core), the host
-  daemon, which Install fetches
-- the managed Sunshine fork package from
-  [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine), which
-  core's installer fetches
+Omodachi turns an iPhone or iPad into an extension of an Omarchy desktop. It
+ships as four repositories, plus the site.
 
-Everything the plugin displays comes from `omodachi-core` over a user-owned
-Unix socket; with no host daemon the panel is one sentence and one button.
+| Repository | What it is |
+| --- | --- |
+| **`omodachi-plugin`** | **this repository: the Omarchy plugin, a thin front end on the desktop** |
+| [`omodachi-core`](https://github.com/omodachi/omodachi-core) | the host daemon, where the weight of the system sits |
+| [`omodachi-ios`](https://github.com/omodachi/omodachi-ios) | the native iPhone and iPad app |
+| [`omodachi-sunshine`](https://github.com/omodachi/omodachi-sunshine) | the Sunshine fork that drives the remote screen |
+| the site | **omodachi.app**. Its source is not published |
 
-A plugin runs unsandboxed inside the long-lived `omarchy-shell` process. Read
-the source before you enable it.
+This plugin is thin. Everything it knows comes from `omodachi-core`;
+everything it draws comes from Omarchy's own `qs.Ui` kit. There is no state
+here, no configuration file of our own, and no second copy of anything Omarchy
+already ships.
 
-## Screenshots
-
-None here. The site draws the interface: **omodachi.app**.
+`panel` · `service` · `bar-widget`. The bar icon, the Overview / Devices /
+Settings panel, one-step pairing, and starting or installing Host.
 
 ## How it works
 

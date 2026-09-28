@@ -26,12 +26,12 @@ CLI_SUBCOMMANDS = {
 # What a deploy or a package puts on a host, mirroring scripts/deploy_plugin.py
 # and scripts/package.py. Everything else in this tree is repository
 # furniture: the tests, the scripts, the docs, the README, the licence, the
-# marketplace preview.
+# security policy, the marketplace preview.
 PAYLOAD = ("manifest.json", "omodachi.json", "BarWidget.qml", "Panel.qml", "Service.qml",
            "OmodachiModel.js", "MediaPairingModel.js", "PreferencesModel.js",
            "assets", "components", "tools")
 FURNITURE = {"scripts", "tests", "docs", "build", "README.md", "LICENSE",
-             "preview.png", ".gitignore", ".git"}
+             "SECURITY.md", "preview.png", ".gitignore", ".git"}
 
 
 def payload_files() -> list[Path]:

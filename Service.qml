@@ -168,6 +168,20 @@ Item {
                 adminError: service.adminError, error: service.lastError})
         }
         function reconnect(): void { service.reconnect() }
+        // REMOTE-SAFE-1. One row per screen this plugin's bar widget is on:
+        // the output, the bar's position, the corner insets applied there and
+        // where that bar's Omarchy logo is, in output-local logical px. Read
+        // only - core's bar_geometry polls it while a session is live.
+        function barGeometry(): string {
+            var rows = []
+            for (var i = 0; i < service.anchorEntries.length; i++) {
+                var item = service.anchorEntries[i].item
+                if (!item || typeof item.barReport !== "function") continue
+                var row = item.barReport()
+                if (row) rows.push(row)
+            }
+            return JSON.stringify(rows)
+        }
     }
 
     // ---- bar anchor --------------------------------------------------------

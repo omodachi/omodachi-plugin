@@ -231,11 +231,89 @@ function normalizeRemoteBar(value) {
     }
     var result = {active: true, session_id: value.session_id, output_name: value.output_name,
         viewport: {width: viewport.width, height: viewport.height}, orientation: orientation,
-        revision: revision, workspaces: rows}
+        revision: revision, workspaces: rows, bar_insets: normalizeBarInsets(value.bar_insets)}
     if (value.logical_size && Number.isFinite(value.logical_size.width) && value.logical_size.width > 0
         && Number.isFinite(value.logical_size.height) && value.logical_size.height > 0)
         result.logical_size = {width: value.logical_size.width, height: value.logical_size.height}
     return result
+}
+
+// ---- REMOTE-SAFE-1: the bar clears the device's corners ----------------------
+//
+// In a Remote session - Extend or Take over (REMOTE-SAFE-1b) - the owned
+// output is the device's exact shape, so the ends of the host bar on it sit
+// under the device's rounded corners. In a takeover the whole desktop is on
+// that output and `official_bar_position` puts the bar on its long edge; the
+// laptop's own screens are off, and are never touched here anyway. Core publishes, on
+// `remote_bar.bar_insets`, how many logical px of the owned output each corner
+// covers at each end of the bar (top/bottom = the ends of a vertical bar,
+// left/right = the ends of a horizontal one). The bar widget on *that* output,
+// and only that one, moves the bar's two end sections inward by that much.
+//
+// A value this file cannot read is no insets at all, never a broken frame.
+var BAR_INSET_EDGES = ["top", "bottom", "left", "right"]
+// Anything larger is not a corner; core already caps it at a quarter of the bar.
+var BAR_INSET_MAX = 1024
+// hyprland.py:OWNED_NAME. The only outputs this plugin will ever touch the bar
+// of are the ones core created for a session.
+var OWNED_OUTPUT = /^OMODACHI-[0-9a-f]{16}$/
+function normalizeBarInsets(value) {
+    if (!isObject(value)) return null
+    var result = {}, any = false
+    for (var i = 0; i < BAR_INSET_EDGES.length; i++) {
+        var edge = BAR_INSET_EDGES[i], number = value[edge]
+        if (!Number.isInteger(number) || number < 0 || number > BAR_INSET_MAX) return null
+        result[edge] = number
+        if (number > 0) any = true
+    }
+    return any ? result : null
+}
+
+// What the bar on `screenName` should do, or null for "leave it exactly as the
+// shell built it". Non-null only when all of these hold:
+//   * a live Remote session (ready/resizing), in either mode - a finished
+//     session gives null, which is what puts the bar back;
+//   * `remote_bar` names this very screen, and it is one of core's own
+//     OMODACHI-<16 hex> outputs - every other screen, including the laptop's,
+//     always gets null;
+//   * the bar's position is one this knows the axis of;
+//   * at least one of the two ends is actually covered.
+// `leading` is the bar's top (vertical) or left (horizontal) end, `trailing`
+// the bottom or right one - Bar.qml's LeftModules and RightModules.
+function barInsetsFor(snapshot, screenName, position) {
+    if (!remoteActive(snapshot)) return null
+    if (typeof screenName !== "string" || !OWNED_OUTPUT.test(screenName)) return null
+    var bar = snapshot.remote_bar
+    if (!isObject(bar) || bar.active !== true || bar.output_name !== screenName) return null
+    var insets = normalizeBarInsets(bar.bar_insets)
+    if (!insets) return null
+    var result
+    if (position === "left" || position === "right") result = {leading: insets.top, trailing: insets.bottom, vertical: true}
+    else if (position === "top" || position === "bottom") result = {leading: insets.left, trailing: insets.right, vertical: false}
+    else return null
+    return result.leading > 0 || result.trailing > 0 ? result : null
+}
+
+// The end section's margin inside the bar: the shell's own (Style.space(8))
+// unless the corner reaches further than that. Never less than the shell's.
+function sectionMargin(shellMargin, inset) {
+    var base = Number.isFinite(shellMargin) && shellMargin > 0 ? shellMargin : 0
+    return Number.isInteger(inset) && inset > base ? inset : base
+}
+
+// A rectangle in the bar window's own coordinates, moved into its output's.
+// A left or top bar window starts at the output's origin; a right or bottom
+// one ends at the output's far edge. Null for anything that is not a rectangle.
+function outputRect(local, position, screenSize, windowSize) {
+    if (!isObject(local) || !isObject(screenSize) || !isObject(windowSize)) return null
+    var values = [local.x, local.y, local.width, local.height, screenSize.width, screenSize.height,
+                  windowSize.width, windowSize.height]
+    for (var i = 0; i < values.length; i++) if (!Number.isFinite(values[i])) return null
+    if (local.width <= 0 || local.height <= 0) return null
+    var x = local.x, y = local.y
+    if (position === "right") x += Math.max(0, screenSize.width - windowSize.width)
+    else if (position === "bottom") y += Math.max(0, screenSize.height - windowSize.height)
+    return {x: Math.round(x), y: Math.round(y), width: Math.round(local.width), height: Math.round(local.height)}
 }
 
 function normalizeSnapshot(value) {

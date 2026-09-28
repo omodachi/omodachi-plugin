@@ -89,6 +89,30 @@ print(json.dumps({"keepLoaded": True}))
 '''
 
 
+# While a rescan reloads the singleton, the next `omarchy-shell` call can be
+# answered `omarchy-shell is not responding` and exit non-zero for a second or
+# two. That is the shell busy reloading, not a failed deploy, so a rescan that
+# says so is sent again until this many seconds have passed. Any other failure,
+# and the same answer after the deadline, still ends the deploy.
+RESCAN_DEADLINE = 20.0
+NOT_RESPONDING = "is not responding"
+
+
+def retry_not_responding(call, *, deadline: float = RESCAN_DEADLINE, pause: float = 0.5,
+                         clock=time.monotonic, sleep=time.sleep):
+    """Run `call()`; while it fails with "is not responding", run it again until the deadline."""
+    until = clock() + deadline
+    while True:
+        try:
+            return call()
+        except subprocess.CalledProcessError as error:
+            said = b"".join(part for part in (error.stdout, error.stderr)
+                            if isinstance(part, bytes)).decode(errors="replace")
+            if NOT_RESPONDING not in said or clock() >= until:
+                raise
+            sleep(pause)
+
+
 def payload_files(directory: Path) -> dict[str, bytes]:
     found = []
     for name in PAYLOAD:
@@ -155,8 +179,11 @@ def main() -> int:
         receipt.update(release=release, source_hashes=hashes)
         receipts[plugin] = receipt
 
+    def rescan() -> None:
+        retry_not_responding(lambda: run(SHELL + "shell rescanPlugins"))
+
     for _ in range(2):
-        run(SHELL + "shell rescanPlugins")
+        rescan()
         time.sleep(1)
 
     host_plugin = "com.omodachi.host"
@@ -177,7 +204,7 @@ def main() -> int:
 
     for plugin in receipts:
         run("python3 -c " + shlex.quote(FINAL) + " " + shlex.quote(plugin))
-    run(SHELL + "shell rescanPlugins")
+    rescan()
     time.sleep(1)
 
     if host_plugin in receipts:

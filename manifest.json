@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "com.omodachi.host",
   "name": "Omodachi",
-  "version": "0.1.0",
-  "author": "Omodachi",
+  "version": "0.2.0",
+  "author": "Leo Zhang",
   "license": "MIT",
-  "description": "Host status, one-step device pairing and the Remote defaults this computer keeps.",
+  "description": "Use your iPhone or iPad with this Omarchy desktop. Remote makes it an extra screen or hands it the whole desktop to drive by touch, over Sunshine or, failing that, WayVNC. The app also runs the Omarchy menu and keybindings, talks to your coding agent, shows herdr panes and desktop notifications, and opens an SSH terminal. This plugin adds the bar icon and panel, pairs a device with one Approve and installs the open-source host daemon. Guide and app: omodachi.app",
   "kinds": [
     "panel",
     "service",

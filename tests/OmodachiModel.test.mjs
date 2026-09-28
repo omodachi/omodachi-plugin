@@ -555,3 +555,97 @@ assert.equal(plug5.snapshot.event_cursor, 11);
 assert.equal(plug5.snapshot.revision, 4);
 
 console.log('OmodachiModel: PASS (PLUG-5: a patch for a state field the snapshot has not got yet replaces it instead of throwing)');
+
+// --- REMOTE-SAFE-1: only the session's own screen clears the corners --------
+{
+  const owned = 'OMODACHI-f205069b98e94b1a';
+  const insets = {top: 68, bottom: 68, left: 68, right: 68};
+  const bar = {active: true, session_id: live.session_id, output_name: owned,
+    viewport: {width: 402, height: 874}, orientation: 'portrait', revision: '2',
+    logical_size: {width: 589, height: 1280}, workspaces: [], bar_insets: insets};
+  const frame = (remoteValue, barValue) => context.parseFrame(JSON.stringify({ok: true,
+    result: snapshot({remote: remoteValue, remote_bar: barValue})})).snapshot;
+  const extend = frame(live, bar);
+  // The projection carries the insets through normalizeRemoteBar.
+  assert.deepEqual({...extend.remote_bar.bar_insets}, insets);
+
+  // 1. The OMODACHI screen, a vertical bar: top/bottom are its two ends.
+  assert.deepEqual({...context.barInsetsFor(extend, owned, 'left')}, {leading: 68, trailing: 68, vertical: true});
+  assert.deepEqual({...context.barInsetsFor(extend, owned, 'right')}, {leading: 68, trailing: 68, vertical: true});
+  // A horizontal bar: left/right are its two ends.
+  const wide = frame(live, {...bar, bar_insets: {top: 1, bottom: 2, left: 30, right: 40}});
+  assert.deepEqual({...context.barInsetsFor(wide, owned, 'top')}, {leading: 30, trailing: 40, vertical: false});
+  assert.deepEqual({...context.barInsetsFor(wide, owned, 'bottom')}, {leading: 30, trailing: 40, vertical: false});
+
+  // 2. Every other screen does nothing: the laptop's, another OMODACHI output
+  //    (a stale one from an earlier session), an empty name, a lookalike.
+  for (const screen of ['eDP-1', 'OMODACHI-0000000000000000', '', 'omodachi-f205069b98e94b1a',
+                        owned + 'x', 'DP-1 ' + owned, null, undefined]) {
+    assert.equal(context.barInsetsFor(extend, screen, 'left'), null, `screen ${screen} must be left alone`);
+  }
+
+  // 3. REMOTE-SAFE-1b: a takeover's output is the same device shape, so it
+  //    gets the same insets, on the same one screen, on either axis - the
+  //    axis follows the position official_bar_position flips on rotation.
+  const takeover = frame({...live, mode: 'takeover'}, bar);
+  assert.deepEqual({...context.barInsetsFor(takeover, owned, 'left')}, {leading: 68, trailing: 68, vertical: true});
+  const takeoverWide = frame({...live, mode: 'takeover'}, {...bar, bar_insets: {top: 5, bottom: 5, left: 67, right: 67}});
+  assert.deepEqual({...context.barInsetsFor(takeoverWide, owned, 'top')}, {leading: 67, trailing: 67, vertical: false});
+  assert.deepEqual({...context.barInsetsFor(takeoverWide, owned, 'bottom')}, {leading: 67, trailing: 67, vertical: false});
+  for (const screen of ['eDP-1', 'Virtual-1', 'OMODACHI-0000000000000000']) {
+    assert.equal(context.barInsetsFor(takeover, screen, 'left'), null, `takeover: screen ${screen} must be left alone`);
+  }
+  //    No live session, no insets: a finished session, one still being
+  //    created, and a projection that went inactive.
+  assert.equal(context.barInsetsFor(frame(remote(), bar), owned, 'left'), null);
+  assert.equal(context.barInsetsFor(frame({...live, state: 'creating'}, bar), owned, 'left'), null);
+  assert.equal(context.barInsetsFor(frame({...live, state: 'resizing'}, bar), owned, 'left').leading, 68,
+               'a resize keeps the bar where it was until the new value arrives');
+  assert.equal(context.barInsetsFor(frame(live, {active: false}), owned, 'left'), null);
+  assert.equal(context.barInsetsFor(null, owned, 'left'), null);
+
+  // 4. Nothing to do, or nothing readable: null, and the frame survives.
+  assert.equal(context.barInsetsFor(frame(live, {...bar, bar_insets: null}), owned, 'left'), null);
+  assert.equal(context.barInsetsFor(frame(live, {...bar, bar_insets: {top: 0, bottom: 0, left: 0, right: 0}}), owned, 'left'), null);
+  assert.equal(context.barInsetsFor(frame(live, {...bar, bar_insets: {top: 0, bottom: 0, left: 9, right: 9}}), owned, 'left'), null,
+               'a vertical bar ignores the horizontal ends');
+  for (const broken of [{top: -1, bottom: 1, left: 1, right: 1}, {top: 1.5, bottom: 1, left: 1, right: 1},
+                        {top: 1, bottom: 1, left: 1}, {top: '4', bottom: 1, left: 1, right: 1},
+                        {top: 5000, bottom: 1, left: 1, right: 1}, [1, 2, 3, 4], 'x']) {
+    const value = frame(live, {...bar, bar_insets: broken});
+    assert.equal(value.remote_bar.active, true, 'a bad inset never costs the projection');
+    assert.equal(context.barInsetsFor(value, owned, 'left'), null);
+  }
+  // An unknown bar position has no axis to act on.
+  assert.equal(context.barInsetsFor(extend, owned, 'diagonal'), null);
+  assert.equal(context.barInsetsFor(extend, owned, ''), null);
+
+  // 5. The event that ends the session puts the bar back.
+  const endEvent = {instance_id: 'instance-1', seq: 11, type: 'remote_bar.changed', event_id: 'ev_rs1',
+                    ts: 1789935000.0, payload: {remote_bar: {active: false, bar_insets: null}, revision: 4}};
+  const ended = context.mergePatch(extend, endEvent, 'instance-1');
+  assert.equal(ended.kind, 'event');
+  assert.equal(context.barInsetsFor(ended.snapshot, owned, 'left'), null);
+  const takeoverEnded = context.mergePatch(takeover, endEvent, 'instance-1');
+  assert.equal(context.barInsetsFor(takeoverEnded.snapshot, owned, 'left'), null, 'a takeover ending puts the bar back too');
+
+  // The section margin is never less than the shell's own.
+  assert.equal(context.sectionMargin(8, 68), 68);
+  assert.equal(context.sectionMargin(8, 3), 8);
+  assert.equal(context.sectionMargin(9, 0), 9);
+  assert.equal(context.sectionMargin(8, 2.5), 8);
+
+  // Window -> output coordinates: a left/top bar window starts at the origin,
+  // a right/bottom one ends at the far edge.
+  const screenSize = {width: 589, height: 1280};
+  assert.deepEqual({...context.outputRect({x: 0, y: 461, width: 26, height: 27}, 'left', screenSize, {width: 26, height: 1280})},
+                   {x: 0, y: 461, width: 26, height: 27});
+  assert.deepEqual({...context.outputRect({x: 0, y: 461, width: 26, height: 27}, 'right', screenSize, {width: 26, height: 1280})},
+                   {x: 563, y: 461, width: 26, height: 27});
+  assert.deepEqual({...context.outputRect({x: 300, y: 0, width: 27, height: 26}, 'bottom', {width: 1280, height: 589}, {width: 1280, height: 26})},
+                   {x: 300, y: 563, width: 27, height: 26});
+  assert.equal(context.outputRect({x: 0, y: 0, width: 0, height: 1}, 'left', screenSize, screenSize), null);
+  assert.equal(context.outputRect(null, 'left', screenSize, screenSize), null);
+}
+
+console.log('OmodachiModel: PASS (REMOTE-SAFE-1: the corner insets reach only the session screen\'s own bar)');
