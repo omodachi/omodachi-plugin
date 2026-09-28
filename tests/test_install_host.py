@@ -245,7 +245,7 @@ class PinnedCommitTests(UpstreamCase):
 
     def test_the_shipped_pin_carries_a_full_commit_beside_the_tag(self):
         pin = json.loads((ROOT / "omodachi.json").read_text())["core_source"]
-        self.assertEqual(pin["ref"], "v0.1.4")
+        self.assertEqual(pin["ref"], "v0.1.5")
         self.assertTrue(self.module.is_full_commit(pin.get("commit")), pin.get("commit"))
 
 
@@ -1172,6 +1172,133 @@ class OwnershipTests(UpstreamCase):
         self.assertEqual(self.module.VENV_RECORD, module.VENV_RECORD)
         self.assertEqual(self.module.VENV_ID_FILE, module.VENV_ID_FILE)
         self.assertEqual(self.module.PARTIAL, module.PARTIAL)
+
+    # RELEASE-10 (marketplace #8330 finding 6): what a purge after core is
+    # gone deletes - core's --sunshine-build cache and src - goes only while
+    # it is ours AND exactly the commit it was made for; Install replaces a
+    # src of ours that way too. Real repositories throughout.
+    def build_cache(self, *, marker=True, commit_line=True):
+        """What core's fetch_sunshine_commit leaves at ~/.cache/omodachi/sunshine-src."""
+        fork = Path(self.temporary.name) / "fork"
+        if not fork.exists():
+            fork.mkdir()
+            (fork / "scripts").mkdir()
+            (fork / "scripts/package_release.sh").write_text("exit 0\n")
+            (fork / ".gitignore").write_text("build/\nnode_modules/\n")
+            git("init", "--quiet", cwd=fork)
+            git("add", ".", cwd=fork)
+            git("commit", "--quiet", "-m", "fork", cwd=fork)
+        commit = git("rev-parse", "HEAD", cwd=fork)
+        cache = self.module.HOME / ".cache/omodachi/sunshine-src"
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        git("init", "--quiet", "--template=", str(cache), cwd=self.temporary.name)
+        if marker:
+            (cache / self.module.SUNSHINE_BUILD_MARKER).write_text(
+                "omodachi-core install_host.py --sunshine-build cache\n"
+                + (f"commit {commit}\n" if commit_line else ""))
+        git("fetch", "--quiet", "--depth", "1", "file://" + str(fork), commit, cwd=cache)
+        git("checkout", "--quiet", "--force", "--detach", commit, cwd=cache)
+        return cache
+
+    def purge(self):
+        code, out = self.main("--remove", "--purge")      # no installer: purge_only
+        self.assertEqual(code, 0, out)
+        return out
+
+    def test_a_purge_deletes_a_pristine_build_cache_of_cores(self):
+        cache = self.build_cache()
+        (cache / "build").mkdir()
+        (cache / "build/sunshine.o").write_text("object\n")      # the fork's .gitignore names it
+        self.purge()
+        self.assertFalse(cache.exists())
+
+    def test_a_purge_keeps_a_build_cache_with_the_users_changes(self):
+        cases = {"tracked edit": lambda cache: (cache / "scripts/package_release.sh").write_text("mine\n"),
+                 "untracked file": lambda cache: (cache / "notes.md").write_text("mine\n"),
+                 "commit on a branch": lambda cache: (
+                     git("switch", "--quiet", "-c", "mine", cwd=cache),
+                     (cache / "notes.md").write_text("mine\n"), git("add", ".", cwd=cache),
+                     git("commit", "--quiet", "-m", "mine", cwd=cache),
+                     git("checkout", "--quiet", "--detach", "HEAD~1", cwd=cache)),
+                 "marker without a commit (core 0.1.4)": None}
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                shutil.rmtree(self.module.HOME, ignore_errors=True)
+                cache = self.build_cache(commit_line=change is not None)
+                if change:
+                    change(cache)
+                before = tree_digest(cache)
+                out = self.purge()
+                self.assertEqual(tree_digest(cache), before)
+                self.assertIn(f"kept {cache}: ", out)
+                self.assertIn(str(cache), out.split("kept, because they are yours")[1])
+
+    def test_a_purge_leaves_a_build_cache_that_is_not_cores_untouched(self):
+        for variant in ("no marker", "linked .git"):
+            with self.subTest(variant=variant):
+                shutil.rmtree(self.module.HOME, ignore_errors=True)
+                cache = self.build_cache(marker=variant != "no marker")
+                (cache / "mine.txt").write_text("mine\n")
+                if variant == "linked .git":
+                    elsewhere = Path(self.temporary.name) / "elsewhere.git"
+                    shutil.rmtree(elsewhere, ignore_errors=True)
+                    (cache / ".git").rename(elsewhere)
+                    (cache / ".git").symlink_to(elsewhere)
+                before = tree_digest(cache)
+                out = self.purge()
+                self.assertEqual(tree_digest(cache), before)
+                self.assertIn(str(cache), out.split("kept, because they are yours")[1])
+
+    def test_a_purge_keeps_a_src_of_ours_the_user_changed(self):
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        (self.source_dir / "scripts/install_host.py").unlink()      # so core is "gone"
+        (self.source_dir / "notes.md").write_text("mine\n")
+        before = tree_digest(self.source_dir)
+        out = self.purge()
+        self.assertEqual(tree_digest(self.source_dir), before)
+        self.assertIn(f"kept {self.source_dir}: ", out)
+        self.assertTrue(self.module.RECORD_PATH.exists())
+
+    def test_install_moves_aside_a_src_of_ours_holding_a_commit_of_the_users(self):
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        git("switch", "--quiet", "-c", "mine", cwd=self.source_dir)
+        (self.source_dir / "notes.md").write_text("mine\n")
+        git("add", "notes.md", cwd=self.source_dir)
+        git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "mine",
+            cwd=self.source_dir)
+        git("checkout", "--quiet", "--detach", self.first, cwd=self.source_dir)
+        code, out = self.main()
+        self.assertEqual(code, 0, out)
+        [kept] = list(self.module.KEPT_DIR.iterdir())
+        self.assertEqual(git("show", "mine:notes.md", cwd=kept), "mine")
+        self.assertIn("commits of its own: refs/heads/mine", out)
+
+    def test_the_pristine_rule_is_core_s_own(self):
+        core = Path(os.environ.get("OMODACHI_CORE_TREE") or ROOT.parent / "omodachi-core")
+        script = core / "scripts/install_host.py"
+        if not script.is_file():
+            self.skipTest("no omodachi-core checkout beside this one (set OMODACHI_CORE_TREE)")
+        spec = importlib.util.spec_from_file_location("core_install_host", script)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        if not hasattr(module, "owned_checkout_state"):
+            self.fail(f"{script} has no owned_checkout_state: core predates RELEASE-10")
+        self.assertEqual(self.module.SUNSHINE_BUILD_MARKER, module.SUNSHINE_BUILD_MARKER)
+        changes = [None, lambda cache: (cache / "build/x.o").parent.mkdir() or (cache / "build/x.o").write_text("o\n"),
+                   lambda cache: (cache / "scripts/package_release.sh").write_text("mine\n"),
+                   lambda cache: (cache / "notes.md").write_text("mine\n"),
+                   lambda cache: git("tag", "mine", "HEAD", cwd=cache),
+                   lambda cache: (cache / ".git" / self.module.SUNSHINE_BUILD_MARKER.split("/")[-1]).unlink()]
+        for index, change in enumerate(changes):
+            with self.subTest(case=index):
+                shutil.rmtree(self.module.HOME, ignore_errors=True)
+                cache = self.build_cache()
+                if change:
+                    change(cache)
+                self.assertEqual(self.module.owned_checkout_state(cache)[0],
+                                 module.owned_checkout_state(cache)[0])
 
     # Installs made before RELEASE-8.
     def test_an_earlier_install_is_adopted_and_replaced(self):

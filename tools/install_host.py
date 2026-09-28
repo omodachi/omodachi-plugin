@@ -85,6 +85,12 @@ earlier version of this installer made is recognised as one and adopted. Even
 our own checkout is deleted only when it holds nothing but its commit and the
 build output that commit's .gitignore names; otherwise Install moves it to
 ~/.local/share/omodachi-kept/, and `--remove` refuses.
+
+RELEASE-10. "Nothing but its commit" (checkout_differs, the same code as
+core's) also counts a commit of the user's on a branch or in the stash and a
+changed submodule, and it is what a purge after core is gone applies before
+deleting src or core's Sunshine build cache (~/.cache/omodachi/sunshine-src):
+one that holds anything else is kept and listed.
 """
 from __future__ import annotations
 
@@ -337,10 +343,15 @@ def purge_directory(directory: Path, rules: dict, kept: list, *, spare=()) -> No
             else:
                 child.unlink(missing_ok=True)
         elif isinstance(rule, str):
-            marker = child / rule
-            if _real_dir(child) and not marker.is_symlink() and marker.is_file():
+            # RELEASE-10: a checkout of ours (the marker) goes only while it
+            # is exactly the commit it was made to hold; one somebody changed
+            # is kept and listed with what is in it.
+            state, why = owned_checkout_state(child, rule)
+            if state == "pristine":
                 shutil.rmtree(child, ignore_errors=True)
             else:
+                if state == "changed":
+                    print(f"kept {child}: {why}", flush=True)
                 kept.append(child)
         elif _real_dir(child):
             purge_directory(child, rule, kept, spare=spare)
@@ -435,8 +446,14 @@ def purge_only() -> int:
     for directory in sorted((share / "hooks").glob("*"), reverse=True) + [share / "hooks"]:
         _remove_empty(directory)
     # main() has refused a src that is not ours before it gets here.
+    # RELEASE-10: and ours goes only while it is exactly its recorded commit.
     if os.path.lexists(SOURCE_DIR) and ownership()[0] == "ours":
-        _delete(SOURCE_DIR)
+        why = checkout_differs(SOURCE_DIR, read_record().get("commit") or "")
+        if why:
+            print(f"kept {SOURCE_DIR}: {why}", flush=True)
+            kept.append(SOURCE_DIR)
+        else:
+            _delete(SOURCE_DIR)
     # The lock this run holds goes after it is released (main); the record
     # stays while a checkout it names is still there.
     spare = [LOCK_PATH] + ([RECORD_PATH] if os.path.lexists(SOURCE_DIR) else [])
@@ -829,8 +846,11 @@ def _swap_in(fresh: Path, identifier: str, commit: str, url: str) -> tuple[bool,
         # claim_source() said "ours"; ask again right here, where it counts.
         if ownership()[0] != "ours":
             return False, foreign_message(ownership()[1])
-        unchanged, why = _inspect(SOURCE_DIR, prior.get("commit") or "", untracked=True, clean=False)
-        if unchanged and _is_id(prior.get("id")) and _read_id(SOURCE_DIR) == prior["id"]:
+        # RELEASE-10: the same "unchanged" as everywhere else something is
+        # deleted (checkout_differs) - which also counts a commit of the
+        # user's on a branch or in the stash.
+        why = checkout_differs(SOURCE_DIR, prior.get("commit") or "")
+        if not why and _is_id(prior.get("id")) and _read_id(SOURCE_DIR) == prior["id"]:
             aside = SOURCE_DIR.parent / f"{OLD_PREFIX}{prior['id']}"
             write_record({**prior, "pending": [*prior["pending"], prior["id"]]})
         else:
@@ -942,6 +962,162 @@ def verify_checkout(commit: str, *, clean: bool = True) -> tuple[bool, str]:
     if ownership()[0] != "ours":
         return False, f"{SOURCE_DIR} is not a git checkout this installer made"
     return _inspect(SOURCE_DIR, commit, untracked=True, clean=clean)
+
+
+# RELEASE-10 (marketplace #8330 finding 6). Nothing - not even a directory
+# this installer owns - is deleted with a person's work in it. The same rule,
+# and the same code, as core's scripts/install_host.py checkout_differs /
+# owned_checkout_state (tests/test_install_host.py runs both on the same
+# repositories): here it decides whether a --purge after core is gone may
+# delete the Sunshine build cache and src, and whether Install may delete
+# the src it replaces.
+def _listed(names) -> str:
+    names = list(names)
+    return "; ".join(names[:5]) + (f" (and {len(names) - 5} more)" if len(names) > 5 else "")
+
+
+def checkout_differs(tree: Path, commit: str, *, git_dir: Path | None = None,
+                     _top: Path | None = None, _depth: int = 0) -> str:
+    """"" when deleting the checkout `tree` loses nothing but `commit`, else what it would lose.
+
+    `tree` is unchanged when: HEAD is `commit`; no tracked file differs from
+    it; the only files outside it are ones `commit`'s own top-level
+    .gitignore names (build output - judged by that one file, so a .gitignore
+    added to the tree, the user's excludes or the tree's info/exclude cannot
+    hide anything); no branch, tag or stash holds a commit that is not
+    `commit` or one a remote has (refs/remotes, .git/shallow); no linked
+    worktree hangs off it; and every initialised submodule is, by the same
+    rule, the commit `commit` records for it. A checkout with no commit at all (a fetch that
+    failed) is unchanged only while its work tree is empty.
+
+    git never runs *in* `tree`: the refs are read by `git ls-remote`
+    (upload-pack, which git runs safely in repositories it does not trust),
+    and the comparison happens in a scratch repository that borrows the
+    tree's objects (objects/info/alternates) and uses `tree` as its work
+    tree - so the tree's config, hooks, fsmonitor, attributes, excludes and
+    index are never read, and no config from anywhere else either
+    (GIT_CONFIG_GLOBAL=/dev/null, GIT_CONFIG_NOSYSTEM). This guards against
+    accidents: the same user could forge any of it, and could as well delete
+    the directory directly.
+    """
+    git_dir = git_dir or tree / ".git"
+    top = _top or git_dir
+    if _depth > 8:
+        return f"{tree} nests submodules deeper than this installer checks"
+    if not is_full_commit(commit):
+        return f"there is no recorded commit to compare {tree} with"
+    if not _real_dir(tree) or not _real_dir(git_dir):
+        return f"{tree} is not a plain git checkout"
+    worktrees = git_dir / "worktrees"
+    if worktrees.is_symlink() or (worktrees.is_dir() and any(worktrees.iterdir())):
+        return f"{tree} has linked worktrees (git worktree add)"
+    environment = dict(git_environment(), GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+    with tempfile.TemporaryDirectory(prefix="omodachi-inspect-") as scratch:
+        repository = Path(scratch) / "git"
+
+        def git(*arguments, work=True):
+            return subprocess.run(["git", *GIT_SAFE, f"--git-dir={repository}",
+                                   *([f"--work-tree={tree}"] if work else []), *arguments],
+                                  capture_output=True, text=True, env=environment, cwd=scratch)
+
+        listing = subprocess.run(["git", *GIT_SAFE, "ls-remote", str(git_dir)], capture_output=True,
+                                 text=True, env=environment, cwd=scratch)
+        if listing.returncode != 0:
+            return f"{tree}: git could not read it ({(listing.stderr or '').strip()[:200]})"
+        refs, peeled = {}, {}
+        for line in (listing.stdout or "").splitlines():
+            sha, _, name = line.partition("\t")
+            if name.endswith("^{}"):
+                peeled[name[:-3]] = sha
+            elif name:
+                refs[name] = sha
+        head = refs.pop("HEAD", None)
+        if head is None:
+            others = [entry.name for entry in tree.iterdir() if entry.name != ".git"]
+            if others or refs:
+                return f"{tree} has no commit checked out, but holds {_listed(sorted(others) or refs)}"
+            return ""
+        if head != commit:
+            return f"{tree} is at {head[:12]}, not {commit[:12]}"
+        # A commit a remote has is not the user's: what a remote-tracking ref
+        # names, and what git fetched shallow (--depth 1: .git/shallow lists
+        # it) - the tags a `fetch --tags --depth 1` brings, a submodule's
+        # branch tip. A commit made here has its parent, so it is never listed.
+        allowed = ({commit} | {sha for name, sha in refs.items() if name.startswith("refs/remotes/")}
+                   | set(re.findall(r"^[0-9a-f]{40}$", _head_of(git_dir / "shallow", 1 << 20), re.MULTILINE)))
+        extra = sorted(name for name, sha in refs.items()
+                       if not name.startswith("refs/remotes/") and peeled.get(name, sha) not in allowed)
+        if extra:
+            return f"{tree} has commits of its own: {_listed(extra)}"
+        created = subprocess.run(["git", "init", "--quiet", "--bare", "--template=", str(repository)],
+                                 capture_output=True, text=True, env=environment, cwd=scratch)
+        if created.returncode != 0:
+            return f"could not make a scratch repository to check {tree} with"
+        (repository / "objects/info").mkdir(parents=True, exist_ok=True)
+        (repository / "objects/info/alternates").write_text(
+            os.path.realpath(git_dir / "objects") + "\n")
+        for step in (("update-ref", "--no-deref", "HEAD", commit), ("read-tree", commit)):
+            if git(*step).returncode != 0:
+                return f"{tree}: could not load {commit[:12]} to compare it with"
+        tracked = git("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all")
+        lines = [line.strip() for line in (tracked.stdout or "").splitlines()]
+        if tracked.returncode != 0 or lines:
+            return f"{tree} has changed files: {_listed(lines) or 'git failed'}"
+        ignore = Path(scratch) / "pinned-gitignore"
+        pinned = git("cat-file", "blob", f"{commit}:.gitignore", work=False)
+        ignore.write_text(pinned.stdout if pinned.returncode == 0 else "")
+        others = git("ls-files", "--others", "-z", f"--exclude-from={ignore}")
+        names = [name for name in (others.stdout or "").split("\0") if name]
+        if others.returncode != 0 or names:
+            return f"{tree} has files that are not part of {commit[:12]}: {_listed(names) or 'git failed'}"
+        entries = git("ls-tree", "-r", "-z", "--full-tree", commit, work=False)
+        if entries.returncode != 0:
+            return f"{tree}: could not list {commit[:12]}"
+        modules = []
+        for entry in (entries.stdout or "").split("\0"):
+            info, _, path = entry.partition("\t")
+            if info.startswith("160000 commit "):
+                modules.append((path, info.split()[2]))
+    for path, sub_commit in modules:
+        sub = tree / path
+        if os.path.realpath(sub) != os.path.join(os.path.realpath(tree), path):
+            return f"{sub} (a submodule) is not where {commit[:12]} puts it"
+        if not sub.is_dir():
+            return f"{sub} (a submodule) is missing"
+        if not any(sub.iterdir()):
+            continue   # never initialised: git leaves the directory empty
+        dot_git = sub / ".git"
+        if _real_dir(dot_git):
+            sub_git = dot_git
+        else:
+            text = _head_of(dot_git, 4096)
+            if not text.startswith("gitdir: "):
+                return f"{sub} (a submodule) has no git directory this installer can read"
+            sub_git = Path(os.path.realpath(sub / text[len("gitdir: "):].strip()))
+            if os.path.commonpath([sub_git, os.path.realpath(top)]) != os.path.realpath(top):
+                return f"{sub} (a submodule) keeps its git directory outside {top}"
+        why = checkout_differs(sub, sub_commit, git_dir=sub_git, _top=top, _depth=_depth + 1)
+        if why:
+            return why
+    return ""
+
+
+def owned_checkout_state(root: Path, marker: str = SUNSHINE_BUILD_MARKER) -> tuple[str, str]:
+    """("absent" | "foreign" | "pristine" | "changed", why) for core's
+    --sunshine-build cache: ours only with core's marker in its .git, and
+    deleted only while it is exactly the commit that marker records."""
+    if not os.path.lexists(root):
+        return "absent", ""
+    dot_git = root / ".git"
+    marker_path = root / marker
+    if not _real_dir(root) or not _real_dir(dot_git) or marker_path.is_symlink() or not marker_path.is_file():
+        return "foreign", f"{root} is there and is not this installer's build cache"
+    found = re.search(r"^commit ([0-9a-f]{40})$", _head_of(marker_path, 4096), re.MULTILINE)
+    if not found:
+        return "changed", (f"{root} is this installer's build cache, but from before it recorded "
+                           f"the commit it holds, so nothing shows it is unchanged")
+    why = checkout_differs(root, found.group(1))
+    return ("changed", why) if why else ("pristine", "")
 
 
 # RELEASE-7. How core's installer is run. -I: no user site-packages (and so no

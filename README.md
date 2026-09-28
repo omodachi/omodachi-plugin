@@ -43,14 +43,14 @@ omarchy plugin add https://github.com/omodachi/omodachi-plugin.git --enable
 Then open the Omodachi panel from the bar and press **Install** to put the host
 daemon on the computer.
 
-This is version **0.1.0** of the plugin, and it installs the `v0.1.4` tag of
+This is version **0.1.0** of the plugin, and it installs the `v0.1.5` tag of
 the host daemon, at the full commit `omodachi.json` pins.
 
 **Where the host comes from.** Install fetches
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.4` names, the checkout is that
+carries the full 40-character commit that `v0.1.5` names, the checkout is that
 commit, detached, and any other commit is refused. Every Install fetches into a
 new directory, so nothing left in the old checkout is used. Right before it
 runs anything from that checkout, Install deletes the build output core's
@@ -132,7 +132,10 @@ in `~/.config/omodachi`, `~/.cache/omodachi` or `~/.local/state/omodachi`
 (such as `omodachi-menu.jsonc` or `desktop-runtime.json`),
 `~/.local/share/omodachi/agent-workspace` and anything else under
 `~/.local/share/omodachi` are kept, and the uninstaller prints where they are.
-A venv or Sunshine install it cannot show it made is kept too. Removing only
+A venv or Sunshine install it cannot show it made is kept too, and so is a
+checkout it made - `src`, or core's Sunshine build cache
+`~/.cache/omodachi/sunshine-src` - that holds anything besides the commit it
+was made for (a changed file, a file of yours, a commit of yours). Removing only
 the plugin leaves the host daemon running.
 
 **External dependencies.**
