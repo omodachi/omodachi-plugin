@@ -240,6 +240,10 @@ function actionResult(operation, target, binding, result) {
         if (result.request_id !== target || !validStatus) return {ok: false}
         if (operation === "approve_remote") {
             if (!binding || result.device_id !== binding.device_id) return {ok: false}
+            // LITE-1a: a browser gets its credential and nothing else, so no
+            // Remote grant is a success here, not a half-paired device.
+            if (result.client && typeof result.client === "object" && result.client.kind === "web" && result.remote === undefined)
+                return {ok: true, message: "Web app approved: the menu, keybindings and notifications. No screen, no SSH."}
             var grant = remoteGrant(result, binding)
             if (!grant) return {ok: false}
             // PAIR-3 §1.2: a grant that did not land is reported on the card,

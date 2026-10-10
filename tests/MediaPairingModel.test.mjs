@@ -98,6 +98,16 @@ assert.equal(context.actionResult('approve_remote',companionId,{device_id:'fixtu
 assert.equal(context.actionResult('approve_remote',companionId,{device_id:'fixture-ipad'},{...remoteApproved,status:'claimed'}).ok,true);
 assert.equal(context.actionResult('approve_remote',companionId,{device_id:'fixture-ipad'},{...remoteApproved,status:'rejected'}).ok,false);
 assert.equal(context.actionResult('approve',companionId,null,remoteApproved).ok,false);
+// LITE-1a: a web client's Approve lands its credential and nothing else; that
+// is a success, not a half-paired device to repair - but only when core said
+// it was a web client and there is no Remote answer at all.
+const webApproved={request_id:companionId,device_id:'odomo-1',status:'approved',client:{kind:'web',label:'Safari on iPhone'}};
+const webOutcome=context.actionResult('approve_remote',companionId,{device_id:'odomo-1'},webApproved);
+assert.equal(webOutcome.ok,true);
+assert.equal(webOutcome.warning,undefined);
+assert.match(webOutcome.message,/No screen, no SSH/);
+assert.equal(context.actionResult('approve_remote',companionId,{device_id:'odomo-1'},{...webApproved,client:{kind:'native',label:null}}).ok,false);
+assert.equal(context.actionResult('approve_remote',companionId,{device_id:'other'},webApproved).ok,false);
 assert.equal(context.actionResult('media_approve',item.attempt_id,context.localBinding(item),{...item,status:'awaiting_client_proof',media_authorized:true}).message,
     "Waiting for the device's pairing proof");
 assert.equal(context.actionResult('media_approve',item.attempt_id,context.localBinding(item),{accepted:true,request_id:item.request_id,status:'awaiting_client_proof'}).ok,false);

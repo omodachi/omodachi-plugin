@@ -31,10 +31,12 @@ iPhone and iPad app: in App Store review; build it yourself from
    password only for `sudo`: to add firewall rules when ufw is installed, and
    to install any of Sunshine's libraries or `wayvnc` that are missing, with
    pacman. The panel says **Ready** when it is done.
-3. Open the Omodachi app on your iPhone or iPad, on the same network. Pick this
-   computer from the list, or add it by name or address, then press
-   **Approve** on the card that appears on the panel's **Devices** page and as
-   an Omarchy notification.
+3. Open the Omodachi app on your iPhone or iPad. With Tailscale on this
+   computer and the phone, paste the name the panel shows under **PAIR A PHONE
+   OR TABLET** (Overview, and Devices until a phone is paired); it works from
+   anywhere. Without Tailscale, the phone has to be on the same Wi-Fi: pick
+   this computer from the list. Then press **Approve** on the card that
+   appears on the panel's **Devices** page and as an Omarchy notification.
 
 **Requirements.** Omarchy 4 with its Quickshell shell (tested on the `omarchy`
 4.0.4 package), `python3` 3.11 or newer, `git` and `jq`; `sshd` running if you
@@ -46,7 +48,7 @@ VA-API video encoder, and through WayVNC otherwise.
 `omarchy-restart-shell`: the running shell keeps the plugin version it loaded
 until it restarts.
 
-This is version **0.2.0** of the plugin, and it installs the `v0.1.5` tag of
+This is version **0.2.1** of the plugin, and it installs the `v0.2.0` tag of
 the host daemon, at the full commit `omodachi.json` pins. What Install changes,
 and how to take it all back, is under [Security model](#security-model) and
 [Remove](#remove).
@@ -77,6 +79,20 @@ keyboard.
 While a session runs, the Omarchy bar on the device's screen moves its two ends
 in, clear of the device's rounded corners, and the Omodachi mark drawn over the
 Omarchy logo brings the app's panel down over the picture.
+
+You can always end a session from the computer, whichever device holds it and
+whether or not that device still responds. During an Extra screen session,
+right-click the bar icon and choose **End Remote session** on Overview. During
+a Take over the computer's screen is off, so run this from a terminal, a text
+console or an SSH login as your user:
+
+```sh
+omodachi-host remote stop --all
+```
+
+To have a key for it, add one to your own Hyprland bindings; Omodachi does not
+edit them. It only works while the computer's keyboard is live, so not in a
+Take over with the keyboard and mouse locked.
 
 ### The Omarchy menu and keybindings
 
@@ -116,8 +132,23 @@ goes when you remove the device.
 
 What the Omarchy shell shows as a notification appears in the app while it is
 connected: in a list you can dismiss or clear, and as a toast inside the app.
-Do Not Disturb is one switch. There is no push service, so nothing arrives
-while the app is closed.
+Do Not Disturb is one switch. The app has no push service of its own, so it
+sees notifications while it is open.
+
+### Odomo, and push to a locked phone
+
+When Tailscale runs on the computer, Install also gives Odomo, the web app the
+computer serves, an address on your tailnet -
+`https://<computer>.<tailnet>.ts.net/odomo/`, through one `tailscale serve`
+mapping - and the panel's Overview shows it with a Copy button (or says why
+there is none, and the one command that fixes it). Open it on a phone, Share ›
+Add to Home Screen, and pair it with the same Approve as the app: it is the
+Omarchy menu, keybindings and notifications, never the screen or SSH. In its
+Settings, **Turn on notifications** lets the computer push to that phone even
+while it is locked: when the agent needs approval or an answer, when it is
+done, when an agent in herdr is blocked, and for desktop notifications - each
+one a switch, with a snooze. The Devices page shows each
+web app by name with its push state, and can switch push off for one of them.
 
 ### Pairing, and what a device may do
 
@@ -136,6 +167,23 @@ Pairing can also require an invitation:
 `omodachi-host preferences set --revision <n> --pairing-mode invite`, where
 `<n>` is the `revision` that `omodachi-host preferences get` prints.
 
+**Over Tailscale** (core 0.2.0 and iOS app 0.2.0), a request
+from the tailnet reads `"iPhone" via Tailscale wants to connect`, with the
+Tailscale device name and its owner as this computer's own `tailscale whois`
+reports them, never the raw `100.x` address. A device that is already paired
+and asks again (it forgot this computer, or was reinstalled) says so on the
+card; approving it replaces its old credential. While Tailscale runs, the
+Overview page shows this computer's Tailscale name to paste on the phone, with
+Copy and the short form, and a **TAILSCALE** section: that over Tailscale the tailnet's access rules decide who reaches
+it (not ufw), a red line when **Tailscale SSH** is on (SSH over the tailnet then
+ignores Omodachi's approval, and Remove here does not stop it), and a red line
+when Tailscale routes this computer's own network through the tailnet
+(`--accept-routes`, Omarchy's default, with a subnet router for this LAN), with
+the command that fixes it, `tailscale set --accept-routes=false`, which the
+panel shows and never runs. When Tailscale is installed but not signed in, or
+not installed, Overview says so in one line: phones then pair on this Wi-Fi
+only. The panel never runs `tailscale up` for you.
+
 ## Security model
 
 ### Who can do what
@@ -143,7 +191,8 @@ Pairing can also require an invitation:
 - **A paired device** can do what its pairing card listed, and that is a
   lot: with the SSH login and every menu row it reaches about as far as you
   do at the keyboard, as your user. It cannot answer a password prompt unless
-  you opt in (next point). **Remove** revokes all of it in one step.
+  you opt in (next point). **Remove** revokes all of it in one step. A device
+  can end only its own Remote session; you, at the computer, can end anyone's.
 - **Password prompts** stay yours unless you opt in: only if core's installer
   is run with `--pam` can a paired device approve a `sudo` or polkit prompt,
   and then only with a device key kept in a root-owned store and checked by a
@@ -160,6 +209,15 @@ Pairing can also require an invitation:
   root) are refused on the first request and run only on a second one for the
   same row from the same device within 30 seconds, and the app asks you to tap
   twice.
+- **A web app (Odomo)** holds a smaller credential: the menu,
+  keybindings, notifications and its own push settings, never Remote, SSH,
+  the clipboard or the microphone. Its pages are served unauthenticated by
+  the host daemon (a page has to load before it can pair); push leaves the
+  computer as encrypted outbound HTTPS to the browser's own push service
+  (Apple, Google, Mozilla) and says only what happened, with ids. Install's
+  `tailscale serve` mapping is the only thing it adds to Tailscale, and Remove
+  takes back only that mapping, only while it is unchanged. Core's README has
+  the detail.
 
 ### What Install does
 
@@ -167,7 +225,7 @@ Pairing can also require an invitation:
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.1.5` names, the checkout is that
+carries the full 40-character commit that `v0.2.0` names, the checkout is that
 commit, detached, and any other commit is refused. Every Install fetches into a
 new directory, so nothing left in the old checkout is used. Right before it
 runs anything from that checkout, Install deletes the build output core's
@@ -213,7 +271,8 @@ pinned core (see Working on it).
 | `~/.local/bin/`, `~/.local/share/applications/` | the `omodachid`, `omodachi-host` and `omodachi-panel` commands and a desktop entry with its icon |
 | `~/.config/omarchy/` | the theme template `themed/omodachi-theme.json.tpl` and the `theme-set`/`font-set` hooks, installed with `omarchy hook install`; the current theme is re-applied headless so Omarchy renders the template |
 | `~/.config/sunshine/apps.json` | one app entry, only for a Sunshine it manages (the original kept as `apps.json.omodachi-bak`) |
-| ufw, with `sudo` | allow rules for `8099/tcp` and the Sunshine ports from `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` and `tailscale0`; the installer then says whether ufw is active and actually filtering, or that those ports are reachable from every network |
+| ufw, with `sudo` | allow rules for `8099/tcp` and the Sunshine ports from `10.0.0.0/8`, `172.16.0.0/12` and `192.168.0.0/16` (from core 0.2.0 no `tailscale0` rules: they never filtered anything, and Install removes the ones earlier versions added); the installer then says whether ufw is active and actually filtering, or that those ports are reachable from every network, and that over Tailscale your tailnet's access rules decide, not ufw |
+| `tailscale serve`, when Tailscale runs | one mapping, `https://<computer>.<tailnet>.ts.net` on port 443 (8443 if 443 is already yours; none if both are) to the host daemon, as Odomo's address; recorded in `~/.local/state/omodachi/tailscale-serve.json`. Never `serve reset`, never a path under another port's mapping, no `sudo` (if you are not Tailscale's operator it prints `sudo tailscale set --operator=$USER` for you to run). The name lands in public certificate-transparency logs, as for any `tailscale serve` |
 | pacman | Sunshine's runtime libraries and `wayvnc`, only those missing |
 | `~/.local/state/omodachi/`, `~/.cache/omodachi/` | the installers' records of what they made, Remote's session journals, the downloaded archive, this Install's status |
 
@@ -312,8 +371,14 @@ omodachid.service`.
 | --- | --- | --- |
 | `absent` | no Host answering | `dimmed` → the kit's 0.45 |
 | `idle` | still checking | plain bar foreground |
-| `linked` | connected | `active` → `Color.bar.active` |
-| `remote` | a session is running | `active` + a small square marker |
+| `linked` | connected | plain bar foreground |
+| `remote` | a session is running | `active` → `Color.bar.active` + a small square marker |
+
+The active colour is the theme's `bar.active`, which Omarchy resolves to
+`urgent` (red on most themes) when a theme leaves it unset. So it is kept for
+what a recording indicator means — someone sees or controls this screen right
+now — and a linked phone alone is not that. While a takeover holds the screen
+the icon is also dimmed (MENU-2). `Model.iconLook` is the whole mapping.
 
 The marker lives inside our own slot. The design sketch put it in a second bar
 slot; that would mean editing the user's `shell.json` layout, which no plugin

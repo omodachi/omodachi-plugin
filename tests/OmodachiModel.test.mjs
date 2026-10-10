@@ -81,6 +81,28 @@ for (const state of ['loading', 'ready', 'limited', 'setup_required', 'permissio
   assert.ok(context.iconTooltip(state, false, null).length > 0, state);
 assert.match(context.iconTooltip('ready', true, {mode: 'takeover', backend: 'sunshine'}), /Takeover · sunshine/);
 
+// --- PLUGIN-COLOR-1: icon state -> colour -------------------------------
+// The active colour (bar.urgent, red on most themes) means "someone sees or
+// controls this screen now" - a running Remote session, nothing else. A
+// linked phone is the plain bar foreground, not dimmed.
+const look = (state, locked) => JSON.parse(JSON.stringify(context.iconLook(state, locked)));
+assert.deepEqual(look('absent', false), {dimmed: true, active: false, indicator: false});
+assert.deepEqual(look('idle', false), {dimmed: false, active: false, indicator: false});
+assert.deepEqual(look('linked', false), {dimmed: false, active: false, indicator: false});
+assert.deepEqual(look('remote', false), {dimmed: false, active: true, indicator: true});
+// A takeover holds the screen: dimmed as before, still the session's colour.
+assert.deepEqual(look('remote', true), {dimmed: true, active: true, indicator: true});
+assert.deepEqual(look('linked', true), {dimmed: true, active: false, indicator: false});
+// Only "remote" ever wears the active colour, whatever else is passed.
+for (const state of [...context.ICON_STATES, 'unknown', undefined])
+  for (const locked of [false, true, undefined])
+    assert.equal(look(state, locked).active, state === 'remote', String(state));
+// End to end from the connection state: ready/limited without a session is linked, and not red.
+for (const state of ['ready', 'limited']) {
+  assert.equal(look(context.iconState(state, false), false).active, false, state);
+  assert.equal(look(context.iconState(state, true), false).active, true, state);
+}
+
 // --- bar roles core actually emits ----------------------------------------
 const bar = {source: 'shell.json', source_status: 'available', position: 'left', revision: '0123456789abcdef',
   left: [{id: 'example.other-plugin', role: 'unsupported'}, {id: 'omarchy.workspaces', role: 'workspaces'}],
@@ -467,6 +489,45 @@ assert.equal(bare.remote_addr, '');
 assert.equal(bare.ssh_fingerprint, '');
 assert.equal(context.requestDetail(bare), 'ios-pad');
 assert.equal(context.pairRequests({}), null);
+
+// LITE-1a: a browser's request. The card is headed by core's label, says who
+// Tailscale says asked (NEXT-1: the same `via` as the App's - whois on the
+// peer serve forwarded for), and promises no screen and no SSH.
+const webFrame = {requests: [{request_id: requestId, device_id: 'odomo-0123456789abcdef', device_name: 'Safari on iPhone',
+  status: 'pending', remote_addr: '100.64.0.7', client: {kind: 'web', label: 'Safari on iPhone'},
+  client_label: 'Web app \u00b7 Safari on iPhone', via: {kind: 'tailnet', peer_name: 'leo-iphone', login: 'alex@example.com'},
+  grants: {companion: false, media: false, ssh: false}}]};
+const web = context.pairRequests(webFrame)[0];
+assert.equal(web.web, true);
+assert.equal(context.requestTitle(web), 'Web app \u00b7 Safari on iPhone via Tailscale wants to connect');
+assert.equal(context.requestDetail(web), 'odomo-0123456789abcdef \u00b7 via Tailscale device leo-iphone (alex@example.com)');
+assert.ok(!context.requestDetail(web).includes('100.64'));
+assert.equal(context.grantLine(web), context.WEB_GRANT_LINE);
+assert.ok(context.grantLine(web).includes('Never the screen, never SSH'));
+assert.ok(!context.grantLine(web).includes('keyboard and mouse'));
+assert.ok(context.approvalNote(web).includes('no Remote certificate'));
+assert.ok(context.approvalNote(request).includes('Remote certificate, in one call'));
+assert.equal(context.requestNotification(web).title, context.requestTitle(web));
+// a hostile label is cleaned like a name; a missing one is just "Web app"
+const webHostile = context.pairRequests({requests: [{...webFrame.requests[0], client_label: 'Web app\n\u202eApprove'}]})[0];
+assert.equal(webHostile.client_label, 'Web app Approve');
+const webBare = context.pairRequests({requests: [{...webFrame.requests[0], client_label: undefined, via: undefined}]})[0];
+assert.equal(webBare.client_label, 'Web app');
+// no `via` from an older core: the 100.x still reads as the tailnet, never shown
+assert.equal(webBare.via.kind, 'tailnet');
+assert.equal(webBare.via.login, '');
+assert.equal(webBare.remote_addr, '');
+assert.equal(context.requestTitle(webBare), 'Web app via Tailscale wants to connect');
+// the App's own request is unchanged by any of it
+assert.equal(request.web, false);
+assert.equal(context.requestTitle(request), '\u201cLeo 的 iPad\u201d wants to connect');
+// the device row: `web` is a role this build knows, and says what it is
+const webDevice = context.devices({devices: [{device_id: 'odomo-0123456789abcdef', status: 'authorized',
+  active_credentials: 1, role: 'web'}]})[0];
+assert.equal(webDevice.role, 'web');
+assert.equal(webDevice.revocable, true);
+assert.equal(context.deviceKind(webDevice), 'Web app (Odomo)');
+assert.equal(context.deviceKind({role: 'companion'}), '');
 assert.equal(context.pairRequests({requests: [{request_id: 'nope', device_id: 'x', device_name: 'x'}]}).length, 0);
 
 // RELEASE-9 (B2): the SSH key card. Only well-formed rows, names cleaned, and
@@ -648,4 +709,323 @@ console.log('OmodachiModel: PASS (PLUG-5: a patch for a state field the snapshot
   assert.equal(context.outputRect(null, 'left', screenSize, screenSize), null);
 }
 
+// --- REMOTE-STOP-1: ending a session from this computer ----------------------
+{
+  const id = live.session_id;
+  // Offered only while a session is live, and only for a well-formed id.
+  assert.equal(context.liveSessionId(snapshot({remote: live})), id);
+  assert.equal(context.canEndRemote(snapshot({remote: live})), true);
+  assert.equal(context.canEndRemote(snapshot({remote: {...live, mode: 'takeover'}})), true, 'either mode');
+  assert.equal(context.canEndRemote(snapshot({remote: {...live, state: 'resizing'}})), true);
+  for (const state of ['offline', 'creating', 'stopping', 'released', 'failed']) {
+    assert.equal(context.canEndRemote(snapshot({remote: {...live, state}})), false, state);
+  }
+  assert.equal(context.canEndRemote(snapshot()), false);
+  assert.equal(context.canEndRemote(null), false);
+  assert.equal(context.canEndRemote(snapshot({remote: {...live, session_id: 'rs_x; rm -rf ~'}})), false);
+  assert.equal(context.canEndRemote(snapshot({remote: {...live, session_id: '--all'}})), false);
+
+  // A fixed argv naming exactly the session the page showed; never a
+  // credential, never a session that replaced it.
+  assert.equal(context.remoteStopCommand(snapshot({remote: live}), id).join('|'),
+               'omodachi-host|remote|stop|--session-id|' + id);
+  assert.equal(context.remoteStopCommand(snapshot({remote: live}), 'rs_' + '1'.repeat(32)), null);
+  assert.equal(context.remoteStopCommand(snapshot(), id), null);
+  assert.equal(context.remoteStopCommand(snapshot({remote: {...live, state: 'released'}}), id), null);
+
+  // Verbatim shape of `omodachi-host remote stop --session-id` (core
+  // REMOTE-STOP-1, `local.remote.stop`).
+  const ended = JSON.stringify({ok: true, result: {released: true, errors: [], ended_by: 'local_owner',
+    sessions: [{session_id: id, owner_device_id: 'ios-60f1f15b', mode: 'extend', released: true, errors: []}]}});
+  // The holding device by the name it paired under, from the panel's own
+  // Devices list (the shape `devices()` projects); never by its raw id.
+  const paired = context.devices({devices: [
+    {device_id: 'com.omodachi.host', status: 'authorized', role: 'plugin', device_name: 'Omodachi panel'},
+    {device_id: 'ios-60f1f15b', status: 'authorized', role: 'companion', device_name: 'Omodachi iPhone'}]});
+  const good = context.remoteStopOutcome(ended, id, paired);
+  assert.equal(good.ok, true);
+  assert.equal(good.message, 'Remote session ended; Omodachi iPhone was told it ended on this computer.');
+  // No list, no row for it, an empty or id-shaped name: "the device", and the
+  // id never appears.
+  const unnamed = [null, [], context.devices({devices: [{device_id: 'ios-60f1f15b', status: 'authorized'}]}),
+                   [{device_id: 'ios-60f1f15b', device_name: 'ios-60f1f15b'}],
+                   [{device_id: 'ios-60f1f15b', device_name: ' \u200b\n '}],
+                   [{device_id: 'ipad-other', device_name: 'Omodachi iPad'}]];
+  for (const list of unnamed) {
+    const told = context.remoteStopOutcome(ended, id, list);
+    assert.equal(told.message, 'Remote session ended; the device was told it ended on this computer.', JSON.stringify(list));
+    assert.doesNotMatch(told.message, /ios-60f1f15b/);
+  }
+  // A name is cleaned the way the pairing card cleans it.
+  assert.equal(context.remoteStopOutcome(ended, id, [{device_id: 'ios-60f1f15b', device_name: 'Leo\u202e\u2019s\niPhone'}]).message,
+               'Remote session ended; Leo\u2019s iPhone was told it ended on this computer.');
+  assert.equal(context.deviceDisplayName(paired, 'ios-60f1f15b'), 'Omodachi iPhone');
+  assert.equal(context.deviceDisplayName(paired, 'missing'), '');
+  const partial = JSON.stringify({ok: true, result: {released: false, ended_by: 'local_owner',
+    errors: [{step: 'bar', code: 'x'}], sessions: [{session_id: id, owner_device_id: 'ipad', mode: 'extend',
+    released: false, errors: [{step: 'bar', code: 'x'}, {step: 'output; reboot', code: 'y'}]}]}});
+  const half = context.remoteStopOutcome(partial, id);
+  assert.equal(half.ok, false);
+  assert.match(half.message, /could not put back: bar\. Run omodachi-host remote recover/);
+  assert.doesNotMatch(half.message, /reboot/, 'a step name is only ever a code');
+  const gone = context.remoteStopOutcome(JSON.stringify({ok: false, error: 'session_not_found', message: 'session_not_found'}), id);
+  assert.deepEqual({...gone}, {ok: true, message: 'That Remote session had already ended.'});
+  const other = context.remoteStopOutcome(JSON.stringify({ok: true, result: {released: true, errors: [], sessions: []}}), id);
+  assert.equal(other.ok, true);
+  // A core from before REMOTE-STOP-1 prints nothing on stdout (argparse wants
+  // a credential); that is an update to make, not a JSON error to show.
+  for (const raw of ['', 'usage: omodachi-host', '[]', 'null']) {
+    const old = context.remoteStopOutcome(raw, id);
+    assert.equal(old.ok, false, raw);
+    assert.match(old.message, /Update Omodachi Host/);
+  }
+  const refused = context.remoteStopOutcome(JSON.stringify({ok: false, error: 'PermissionError', message: 'x'}), id);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.message, 'The host did not end the session (error).');
+
+  // The left click is the device's; the tooltip says where the local End is.
+  assert.match(context.iconTooltip('ready', true, {mode: 'extend', backend: 'vnc'}), /right-click to end it here/);
+  assert.doesNotMatch(context.iconTooltip('ready', true, {mode: 'takeover', backend: 'vnc'}), /right-click/);
+}
+
 console.log('OmodachiModel: PASS (REMOTE-SAFE-1: the corner insets reach only the session screen\'s own bar)');
+
+// --- TAIL-2 P1-6: a request over the tailnet ---------------------------------
+// The card says who Tailscale on this computer says asked, never the 100.x.
+const tailnetRow = context.pairRequests({requests: [{request_id: requestId, device_id: 'ios-phone',
+  device_name: 'iPhone A', status: 'pending', remote_addr: '100.101.102.103',
+  via: {kind: 'tailnet', peer_name: 'iphone-a', login: 'someone@example.com'}, already_paired: false}]})[0];
+assert.equal(tailnetRow.remote_addr, '');
+assert.equal(context.requestTitle(tailnetRow), '“iPhone A” via Tailscale wants to connect');
+assert.equal(context.requestDetail(tailnetRow), 'ios-phone · via Tailscale device iphone-a (someone@example.com)');
+const tailnetNote = context.requestNotification(tailnetRow);
+assert.equal(tailnetNote.title, '“iPhone A” via Tailscale wants to connect');
+assert.ok(!JSON.stringify(tailnetNote).includes('100.101.102.103'));
+assert.ok(!JSON.stringify(tailnetRow).includes('100.101.102.103'));
+// An older core sends no `via`; a tailnet source is still not drawn.
+const oldCore = context.pairRequests({requests: [{request_id: requestId, device_id: 'ios-phone',
+  device_name: 'iPhone A', status: 'pending', remote_addr: '100.64.0.7'}]})[0];
+assert.equal(oldCore.via.kind, 'tailnet');
+assert.equal(context.requestDetail(oldCore), 'ios-phone · via Tailscale');
+assert.ok(!context.requestNotification(oldCore).body.includes('100.64.0.7'));
+// 100.128/10 is not Tailscale's range: that address is shown as before.
+assert.equal(context.requestDetail(context.pairRequests({requests: [{request_id: requestId,
+  device_id: 'x', device_name: 'x', status: 'pending', remote_addr: '100.128.0.1'}]})[0]), 'x · from 100.128.0.1');
+// A LAN request with `via` keeps its address line exactly as before.
+assert.equal(context.requestDetail(context.pairRequests({requests: [{...requestFrame.requests[0],
+  via: {kind: 'lan', peer_name: null, login: null}}]})[0]),
+  'ios-pad · from 192.168.1.22 · SHA256:ujDWcEv6kr0q…');
+// Hostile whois strings are cleaned like a device name.
+const hostileVia = context.pairRequests({requests: [{request_id: requestId, device_id: 'x', device_name: 'x',
+  status: 'pending', via: {kind: 'tailnet', peer_name: 'a\nApprove‮', login: 'l'.repeat(300)}}]})[0];
+assert.equal(hostileVia.via.peer_name, 'a Approve');
+assert.ok(hostileVia.via.login.length <= 128);
+// TAIL-2 P0-2: a device that already holds a credential may ask again.
+const again = context.pairRequests({requests: [{...requestFrame.requests[0], already_paired: true}]})[0];
+assert.ok(context.requestDetail(again).endsWith('already paired - approving replaces its credential'));
+
+// --- TAIL-2 P1-1 / P1-2 / P1-4: `omodachi-host tailnet` ----------------------
+const report = context.tailnetReport({running: true, dns_name: 'omodachi-lab.tail0000.ts.net',
+  lan_routes_captured: ['10.201.201.0/24', 'bad route'],
+  warnings: [{id: 'tailnet_firewall', text: 'x'}, {id: 'accept_routes_lan', text: 'x'},
+             {id: 'tailscale_ssh', text: 'x'}, {id: 'something_new', text: 'ignored'}]});
+assert.equal(report.running, true);
+assert.equal(report.dns_name, 'omodachi-lab.tail0000.ts.net');
+assert.equal(JSON.stringify(report.warnings.map(w => w.id)), JSON.stringify(['tailscale_ssh', 'accept_routes_lan', 'tailnet_firewall']));
+assert.ok(report.warnings[0].text.includes('revoking a device here does not stop it'));
+assert.equal(report.warnings[0].severe, true);
+assert.ok(report.warnings[1].text.includes('(10.201.201.0/24)'));
+assert.ok(!report.warnings[1].text.includes('bad route'));
+assert.equal(report.warnings[1].command, 'tailscale set --accept-routes=false');
+assert.ok(report.warnings[2].text.includes('not ufw'));
+// No Tailscale, an older core without the command, garbage: nothing to say.
+assert.equal(JSON.stringify(context.tailnetReport(null)), JSON.stringify({running: false, dns_name: '', short_name: '', state: '', warnings: []}));
+assert.equal(context.tailnetReport({running: false, warnings: []}).warnings.length, 0);
+assert.equal(context.tailnetReport({running: true, dns_name: 'evil.example.com', warnings: []}).dns_name, '');
+
+console.log('OmodachiModel: PASS (TAIL-2: tailnet requests name the Tailscale device, never its 100.x; the tailnet warnings)');
+
+// --- TAIL-3b: the pair block --------------------------------------------------
+// `omodachi-host tailnet` (core tailnet.host_report) shapes, mapped to state.
+{
+  const absent = context.tailnetReport({installed: false, backend_state: null, running: false, dns_name: null,
+    ips: [], ssh: null, accept_routes: null, netfilter_mode: null, lan_routes_captured: [], warnings: []});
+  assert.equal(absent.state, 'absent');
+  assert.equal(absent.short_name, '');
+  const needsLogin = context.tailnetReport({installed: true, backend_state: 'NeedsLogin', running: false,
+    dns_name: null, ips: [], lan_routes_captured: [], warnings: []});
+  assert.equal(needsLogin.state, 'signed_out');
+  const stopped = context.tailnetReport({installed: true, backend_state: 'Stopped', running: false, dns_name: null,
+    warnings: []});
+  assert.equal(stopped.state, 'signed_out');
+  // Installed but `tailscale status` unreadable: backend_state null, still not running.
+  assert.equal(context.tailnetReport({installed: true, backend_state: null, running: false, warnings: []}).state,
+    'signed_out');
+  const running = context.tailnetReport({installed: true, backend_state: 'Running', running: true,
+    dns_name: 'omarchy.tail-demo.ts.net', ips: ['100.64.0.1'], lan_routes_captured: [],
+    warnings: [{id: 'tailnet_firewall', text: 'x'}]});
+  assert.equal(running.state, 'running');
+  assert.equal(running.dns_name, 'omarchy.tail-demo.ts.net');
+  assert.equal(running.short_name, 'omarchy');
+  assert.equal(context.showPairBlock(running), true);
+  // Running without a name it can give (missing or not *.ts.net): no block.
+  const noName = context.tailnetReport({installed: true, running: true, dns_name: null, warnings: []});
+  assert.equal(noName.state, 'running');
+  assert.equal(noName.short_name, '');
+  assert.equal(context.showPairBlock(noName), false);
+  const badName = context.tailnetReport({installed: true, running: true, dns_name: 'evil.example.com', warnings: []});
+  assert.equal(badName.short_name, '');
+  assert.equal(context.showPairBlock(badName), false);
+  // No report (older core, not read yet) says nothing - never "absent".
+  assert.equal(context.tailnetReport(null).state, '');
+  assert.equal(context.pairText(context.tailnetReport(null)).note, '');
+  assert.equal(context.showPairBlock(null), false);
+  // An older core without `installed` but running still pairs by name.
+  assert.equal(context.tailnetReport({running: true, dns_name: 'a.b.ts.net', warnings: []}).state, 'running');
+
+  // The strings, from the one table.
+  const text = context.pairText(running);
+  assert.equal(text.header, 'PAIR A PHONE OR TABLET');
+  assert.equal(text.nameLabel, "This computer's name on Tailscale");
+  assert.equal(text.copy, 'Copy');
+  assert.equal(text.copied, 'Copied');
+  assert.equal(text.short, 'or just omarchy');
+  assert.equal(text.how, 'Open Omodachi on your iPhone or iPad and paste this name.');
+  assert.equal(text.note, '');
+  assert.equal(context.pairText(needsLogin).note,
+    'Tailscale is installed but not signed in. Sign in from Tailscale in the bar, or run tailscale up. Until then phones pair on this Wi-Fi only.');
+  assert.equal(context.pairText(absent).note,
+    'Without Tailscale, phones pair on this Wi-Fi only. To add it: Omarchy menu › Install › Service › Tailscale.');
+  assert.equal(context.pairText(noName).short, '');
+  for (const value of Object.values(context.PAIR_TEXT)) assert.ok(!/100\.\d/.test(value));
+
+  // Devices: on top until a phone or tablet (not this panel, not a web app) is paired.
+  const rows = context.devices({devices: [
+    {device_id: 'omodachi-plugin', status: 'authorized', active_credentials: 1, role: 'plugin'},
+    {device_id: 'odomo-0123456789abcdef', status: 'authorized', active_credentials: 1, role: 'web'},
+    {device_id: 'ios-0000000000000000', status: 'revoked', active_credentials: 0, role: 'companion'},
+  ]});
+  assert.equal(context.hasPairedCompanion(rows), false);
+  assert.equal(context.showDevicesPairBlock(running, rows, true), true);
+  assert.equal(context.showDevicesPairBlock(running, rows, false), false);   // list not loaded yet
+  assert.equal(context.showDevicesPairBlock(needsLogin, rows, true), false);
+  const withPhone = rows.concat(context.devices({devices: [
+    {device_id: 'ios-0123456789abcdef', status: 'authorized', active_credentials: 1, role: 'companion'}]}));
+  assert.equal(context.hasPairedCompanion(withPhone), true);
+  assert.equal(context.showDevicesPairBlock(running, withPhone, true), false);
+  // A host from before PAIR-2 sends no role: its rows are companions.
+  assert.equal(context.hasPairedCompanion(context.devices({devices: [
+    {device_id: 'ios-aaaaaaaaaaaaaaaa', status: 'authorized', active_credentials: 1}]})), true);
+}
+
+console.log('OmodachiModel: PASS (TAIL-3b: tailnet state and short name; the pair block and its strings)');
+
+// --- LITE-1b: device names, push per web device, Odomo's address ------------
+{
+  const rows = context.devices({devices: [
+    {device_id: 'odomo-0123456789abcdef', status: 'authorized', active_credentials: 1, device_name: 'Safari on iPhone',
+     role: 'web', push: {subscribed: true, enabled: true}},
+    // A web device paired before LITE-1c keeps its old `lite-…` id: no prefix matters.
+    {device_id: 'lite-fedcba9876543210', status: 'authorized', active_credentials: 1, device_name: null, role: 'web',
+     push: {subscribed: false, enabled: false}},
+    {device_id: 'ios-0123456789abcdef', status: 'authorized', active_credentials: 1, device_name: 'Leo’s iPad',
+     role: 'companion', push: {subscribed: true, enabled: true}},
+    {device_id: 'ios-aaaaaaaaaaaaaaaa', status: 'authorized', active_credentials: 1, device_name: 'ios-aaaaaaaaaaaaaaaa'},
+    {device_id: 'omodachi-plugin', status: 'authorized', active_credentials: 1, role: 'plugin'},
+    {device_id: 'odomo-0000000000000000', status: 'authorized', active_credentials: 1, role: 'web', push: {subscribed: 'yes'}},
+  ]});
+  // Never the raw id as a row's title.
+  assert.equal(JSON.stringify(rows.map((row) => context.deviceTitle(row))),
+    JSON.stringify(['Safari on iPhone', 'Web app', 'Leo’s iPad', 'Unnamed device', "This computer's panel", 'Web app']));
+  for (const row of rows) assert.ok(!/^(odomo|lite|ios)-/.test(context.deviceTitle(row)));   // old `lite-…` ids too
+  assert.equal(context.pushLine(rows[0]), 'Push: on');
+  assert.equal(context.pushLine(rows[1]), 'Push: off on this computer');
+  assert.equal(context.pushLine({role: 'web', push: {subscribed: false, enabled: true}}), 'Push: not turned on in this browser');
+  assert.equal(rows[2].push, null);                       // a native device has no web push
+  assert.equal(rows[5].push, null);                       // malformed: nothing drawn
+  assert.equal(context.pushLine(rows[2]), '');
+  // NEXT-1 §6.2: Remove on a web row does not promise a Remote certificate.
+  assert.ok(!context.removeNote(rows[0]).includes('Remote certificate'));
+  assert.equal(context.removeNote(rows[0]), 'This web app loses its credential and its push subscription. It has to be approved again next time.');
+  assert.ok(context.removeNote(rows[2]).includes('Remote certificate'));
+  assert.equal(context.deviceLabelFor(rows, 'odomo-0123456789abcdef'), 'Safari on iPhone');
+  assert.equal(context.deviceLabelFor(rows, 'ios-aaaaaaaaaaaaaaaa'), 'A paired device');
+
+  const on = context.odomoStatus({enabled: true, odomo_url: 'https://omodachi-lab.tail0000.ts.net/odomo/', port: 443});
+  assert.equal(on.on, true);
+  assert.equal(on.url, 'https://omodachi-lab.tail0000.ts.net/odomo/');
+  assert.equal(on.text, 'Open this on your phone, then Share \u203a Add to Home Screen.');
+  const alt = context.odomoStatus({enabled: true, odomo_url: 'https://omodachi-lab.tail0000.ts.net:8443/odomo/'});
+  assert.equal(alt.url, 'https://omodachi-lab.tail0000.ts.net:8443/odomo/');
+  // LITE-1c: the field and the path are Odomo's; the old ones are not read.
+  assert.equal(context.odomoStatus({enabled: true, odomo_url: 'https://omodachi-lab.tail0000.ts.net/' + 'li' + 'te/'}).on, false);
+  assert.equal(context.odomoStatus({enabled: true, ['li' + 'te_url']: 'https://omodachi-lab.tail0000.ts.net/odomo/'}).on, false);
+  const operator = context.odomoStatus({enabled: false, reason: 'operator_required', command: 'sudo tailscale set --operator=$USER'});
+  assert.equal(operator.on, false);
+  assert.equal(operator.command, 'sudo tailscale set --operator=$USER');
+  assert.equal(operator.text, 'Tailscale only lets its operator add the address. Run in a terminal:');
+  assert.equal(context.odomoStatus({enabled: false, reason: 'tailscale_not_running'}).text,
+    'Tailscale is not running here, so Odomo has no address.');
+  assert.equal(context.odomoStatus({enabled: false, reason: 'tailscale_not_installed'}).text,
+    'Odomo needs Tailscale on this computer: it is how a phone reaches it with a real certificate.');
+  assert.equal(context.odomoStatus({enabled: false, reason: 'not_enabled'}).text, 'Odomo has no address on your tailnet yet.');
+  assert.equal(context.odomoStatus({enabled: false, reason: 'mapping_missing', command: 'tailscale serve --bg --https=443 https+insecure://127.0.0.1:8099'}).text,
+    "Odomo's tailscale serve mapping is gone. Run in a terminal:");
+  assert.equal(context.odomoStatus({enabled: false, reason: 'mapping_missing'}).text, 'Odomo has no address on your tailnet yet.');
+  assert.equal(context.odomoStatus({enabled: false, reason: 'serve_status_unreadable'}).text, "Could not read tailscale serve's state.");
+  assert.equal(context.odomoStatus({enabled: false, reason: 'something_new'}).text, 'Odomo has no address.');
+  assert.equal(context.odomoStatus({enabled: true, odomo_url: 'https://evil.example.com/odomo/'}).on, false);
+  assert.equal(context.odomoStatus({enabled: false, reason: 'not_enabled', command: 'rm -rf / ; x'}).command, '');
+  assert.equal(context.odomoStatus(null).known, false);
+  assert.equal(context.ODOMO_HEADER, 'ODOMO');
+
+  // LITE-1d: one line, the same count core gives the native app.
+  const web = (id, status, subscribed, enabled) => ({device_id: id, role: 'web', status, push: {subscribed, enabled}});
+  assert.equal(context.odomoPushLine([], false), '');
+  assert.equal(context.odomoPushLine([], true), 'No phone gets notifications from Odomo yet.');
+  assert.equal(context.odomoPushLine([web('a', 'authorized', false, true)], true), 'No phone gets notifications from Odomo yet.');
+  assert.equal(context.odomoPushLine([web('a', 'authorized', true, true)], true), '1 phone gets notifications from Odomo.');
+  assert.equal(context.odomoPushLine([web('a', 'authorized', true, true), web('b', 'authorized', true, true),
+    web('c', 'authorized', true, false), web('d', 'expired', true, true), {device_id: 'ios-x', role: 'companion'}], true),
+    '2 phones get notifications from Odomo.');
+  // An older core reports no push on its web rows: nothing to say.
+  assert.equal(context.odomoPushLine([{device_id: 'a', role: 'web', status: 'authorized'}], true), '');
+}
+
+// --- LITE-1c: the web app's name is Odomo, and it is written in one place ---
+{
+  assert.equal(context.ODOMO_NAME, 'Odomo');
+  // The only string literal in the model that spells the name is the constant
+  // (comments may name it).
+  const code = source.replace(/^\s*\/\/.*$/gm, '');
+  assert.deepEqual(code.match(/(["'])(?:(?!\1)[^\\\n]|\\.)*Odomo(?:(?!\1)[^\\\n]|\\.)*\1/g), ['"Odomo"']);
+  // So a rename is that one line: load the model with another name and every
+  // string that names the web app follows it.
+  const renamed = vm.createContext({ console, Number, JSON, Object, Array, Math });
+  vm.runInContext(source.replace('.pragma library', '').replace('var ODOMO_NAME = "Odomo"', 'var ODOMO_NAME = "Zebra"'), renamed);
+  const webRow = {role: 'web', push: {subscribed: false, enabled: true}};
+  const named = [renamed.deviceKind(webRow), renamed.ODOMO_HEADER,
+    ...['tailscale_not_installed', 'tailscale_not_running', 'not_enabled', 'something_new'].map(
+      (reason) => renamed.odomoStatus({enabled: false, reason}).text),
+    renamed.odomoStatus({enabled: false, reason: 'mapping_missing', command: 'tailscale serve --https=443 off'}).text];
+  for (const value of named) assert.ok(/Zebra|ZEBRA/.test(value) && !/Odomo|ODOMO/.test(value), value);
+  // And no string the panel can show says the old name.
+  const shown = [];
+  const collect = (value) => {
+    if (typeof value === 'string') shown.push(value);
+    else if (value && typeof value === 'object') for (const inner of Object.values(value)) collect(inner);
+  };
+  for (const key of Object.keys(context)) collect(context[key]);
+  for (const row of [webRow, {role: 'web', push: {subscribed: true, enabled: false}}, {role: 'companion'}, {role: 'plugin'}]) {
+    shown.push(context.deviceKind(row), context.deviceTitle(row), context.pushLine(row), context.removeNote(row));
+  }
+  for (const state of ['running', 'signed_out', 'absent']) collect(context.pairText({state, short_name: 'omarchy'}));
+  for (const reason of [...Object.keys(context.ODOMO_REASONS), 'something_new', undefined])
+    shown.push(context.odomoStatus({enabled: false, reason, command: 'tailscale serve --https=443 off'}).text,
+               context.odomoStatus({enabled: false, reason}).text);
+  assert.ok(shown.length > 40);
+  const oldName = new RegExp('\\b' + 'li' + 'te\\b', 'i');
+  for (const value of shown) assert.ok(!oldName.test(value), value);
+}
+
+console.log('OmodachiModel: PASS (LITE-1b/1c: device rows by name, never the raw id; push per web device; the Odomo address row; the name in one place)');

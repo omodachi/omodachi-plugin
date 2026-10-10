@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
 // SPEC-C §5: the canonical fixtures in ../omodachi-core/contracts/fixtures are
@@ -8,9 +9,13 @@ import vm from 'node:vm';
 // them is the only check that says something about the real wire. If core
 // changes a shape, this fails here rather than on the host.
 
-const FIXTURES = new URL('../../omodachi-core/contracts/fixtures/', import.meta.url);
+// OMODACHI_CORE_TREE names another core checkout (a worktree), as for the
+// Python suites.
+const FIXTURES = process.env.OMODACHI_CORE_TREE
+  ? pathToFileURL(process.env.OMODACHI_CORE_TREE.replace(/\/*$/, '/') + 'contracts/fixtures/')
+  : new URL('../../omodachi-core/contracts/fixtures/', import.meta.url);
 if (!existsSync(FIXTURES)) {
-  console.log('contracts: SKIPPED (../omodachi-core/contracts/fixtures is not checked out)');
+  console.log('contracts: SKIPPED (no omodachi-core contracts/fixtures beside this one; set OMODACHI_CORE_TREE)');
   process.exit(0);
 }
 

@@ -232,7 +232,8 @@ def run(argv, **kwargs):
 # leaves it empty; a string is a directory removed whole only when that marker
 # file of ours is in it. In ~/.local/share/omodachi: a venv only when core's
 # record shows core made it (VENV_RECORD), the hook directories only when
-# empty, src only when it is ours; agent-workspace and everything else stay.
+# empty, src only when it is ours, agent-workspace only when empty;
+# everything else stays.
 SUNSHINE_BUILD_MARKER = ".git/omodachi-sunshine-build-cache"
 _TMP = "[a-z0-9_]{8}"
 PURGE_RULES = {
@@ -248,6 +249,12 @@ PURGE_RULES = {
         r"herdr-sessions\.json": None,
         r"herdr-sessions\.json\.lock": None,
         r"\.herdr-sessions" + _TMP: None,
+        # POLISH-U: the folders new Herdr workspaces were made in, and the
+        # write audit (who wrote into which pane, never what) with its one roll.
+        r"herdr-folders\.json": None,
+        r"\.herdr-folders" + _TMP: None,
+        r"herdr-writes\.jsonl": None,
+        r"herdr-writes\.jsonl\.1": None,
         r"biometric-keys\.json": None,
         r"biometric-keys\.json\.lock": None,
         r"\.biometric-" + _TMP: None,
@@ -255,6 +262,10 @@ PURGE_RULES = {
         r"plugin\.token\.new": None,
         r"owned-herdr-pane\.json": None,
         r"agent-requests\.json": None,
+        # REL2-VM-1: what each device has seen (seen.py, NOTIFY-1) and its
+        # temp file; the daemon writes it, so a purge takes it.
+        r"seen\.json": None,
+        r"\.seen-" + _TMP: None,
         r"agent-lifecycle\.lock": None,
         r"\.agent-" + _TMP: None,
         r"sunshine-web-credentials\.json": None,
@@ -271,6 +282,13 @@ PURGE_RULES = {
         r"agent-handoff": {r"handoff_[0-9a-f]{32}\.json": None, r"\.agent-" + _TMP: None},
         r"agent": {r"ws-token": None, r"ws-token-" + _TMP: None,
                    r"endpoint\.json": None, r"endpoint-" + _TMP: None},
+        # LITE-1b C6: the host's VAPID key and the web devices' push
+        # subscriptions (the daemon makes both; a revoke drops a device's row).
+        r"vapid\.json": None,
+        r"\.vapid-" + _TMP: None,
+        r"push-subscriptions\.json": None,
+        r"push-subscriptions\.json\.lock": None,
+        r"\.push-subscriptions-" + _TMP: None,
     },
     ".cache/omodachi": {
         r"install-status\.json": None,
@@ -298,6 +316,13 @@ PURGE_RULES = {
         r"\.venv-ids\.json\.\d+\.tmp": None,
         r"sunshine-unit\.json": None,
         r"\.sunshine-unit\.json\." + _TMP: None,
+        # LITE-1b C7: the record of the `tailscale serve` mapping Install made.
+        r"tailscale-serve\.json": None,
+        r"\.tailscale-serve-" + _TMP: None,
+        # ATTACH-1: files sent from a phone to the Agent or a Herdr pane, and
+        # a stream that died half-way (core's `uploads.py` names both).
+        r"uploads": {r"(agent|herdr|file)-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{32}\.[a-z0-9]{1,10}": None,
+                     r"\.upload-[0-9a-f]{32}\.(part|jpg)": None},
     },
 }
 VENV_RECORD = ".local/state/omodachi/venv-ids.json"
@@ -434,6 +459,90 @@ def remove_ssh_lines() -> tuple[list[str], str]:
     return removed, ""
 
 
+# LITE-1b C7. Core's Install adds one `tailscale serve` mapping for Odomo, the
+# web app, and records it in ~/.local/state/omodachi/tailscale-serve.json;
+# core's own --remove takes it back. This is the same rule for a removal after
+# core is gone (core's odomo_serve.remove; tests/test_odomo_serve_removal.py
+# runs both against the same fake `tailscale`): only a mapping the record says Omodachi made, and
+# only while it still points exactly where it did - turned off with
+# `tailscale serve --https=<port> off`, never `serve reset`.
+SERVE_RECORD = ".local/state/omodachi/tailscale-serve.json"
+_TS_NAME = re.compile(r"[a-z0-9-]{1,63}(\.[a-z0-9-]{1,63})*\.ts\.net")
+
+
+def _serve_record() -> dict | None:
+    try:
+        raw = (HOME / SERVE_RECORD).read_bytes() if not (HOME / SERVE_RECORD).is_symlink() else b""
+        value = json.loads(raw) if 0 < len(raw) <= 4096 else None
+    except (OSError, ValueError):
+        return None
+    if (not isinstance(value, dict) or value.get("port") not in (443, 8443)
+            or not isinstance(value.get("target"), str)
+            or not re.fullmatch(r"https\+insecure://127\.0\.0\.1:[0-9]{1,5}", value["target"])
+            or not isinstance(value.get("dns_name"), str) or not _TS_NAME.fullmatch(value["dns_name"])
+            or value.get("owner") not in ("omodachi", "user")):
+        return None
+    return value
+
+
+def _serve_mapping(serve, name: str, port: int):
+    serve = serve if isinstance(serve, dict) else {}
+    tcp = serve.get("TCP") or {}
+    web = (serve.get("Web") or {}).get(f"{name}:{port}") or {}
+    handler = (web.get("Handlers") or {}).get("/") or {}
+    proxy = handler.get("Proxy") if isinstance(handler, dict) else None
+    if str(port) not in tcp and not web:
+        return None
+    if isinstance(proxy, str) and (tcp.get(str(port)) or {}).get("HTTPS") is True:
+        return proxy
+    return "other"
+
+
+def _serve_status():
+    binary = shutil.which("tailscale")
+    if binary is None:
+        return None, "tailscale_not_installed"
+    try:
+        result = subprocess.run([binary, "serve", "status", "--json"], capture_output=True, text=True,
+                                timeout=10, stdin=subprocess.DEVNULL, check=False)
+        value = json.loads(result.stdout or "{}") if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        value = None
+    return (value, "") if isinstance(value, dict) else (None, "serve_status_unreadable")
+
+
+def remove_tailscale_serve() -> dict:
+    record = _serve_record()
+    path = HOME / SERVE_RECORD
+    if record is None:
+        path.unlink(missing_ok=True)
+        return {"removed": False, "reason": "no_record"}
+    if record["owner"] != "omodachi":
+        path.unlink(missing_ok=True)
+        return {"removed": False, "reason": "not_ours", "port": record["port"]}
+    serve, reason = _serve_status()
+    if reason == "tailscale_not_installed":
+        path.unlink(missing_ok=True)
+        return {"removed": False, "reason": reason, "port": record["port"]}
+    if serve is None:
+        print(f"could not read `tailscale serve status`; the mapping on port {record['port']} was left "
+              f"as it is. Turn it off with:\n    tailscale serve --https={record['port']} off", flush=True)
+        return {"removed": False, "reason": reason, "port": record["port"]}
+    found = _serve_mapping(serve, record["dns_name"], record["port"])
+    if found is None or found != record["target"]:
+        path.unlink(missing_ok=True)
+        return {"removed": False, "reason": "already_gone" if found is None else "changed",
+                "port": record["port"]}
+    subprocess.run([shutil.which("tailscale"), "serve", f"--https={record['port']}", "off"],
+                   capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL, check=False)
+    after, _ = _serve_status()
+    if after is None or _serve_mapping(after, record["dns_name"], record["port"]) is not None:
+        print(f"`tailscale serve --https={record['port']} off` did not take; run it yourself", flush=True)
+        return {"removed": False, "reason": "serve_off_failed", "port": record["port"]}
+    path.unlink(missing_ok=True)
+    return {"removed": True, "port": record["port"]}
+
+
 def purge_only() -> int:
     share = SOURCE_DIR.parent
     kept = []
@@ -465,6 +574,9 @@ def purge_only() -> int:
         purge_directory(HOME / relative, rules, kept, spare=spare)
         _remove_empty(HOME / relative)
         kept[before:] = [path for path in kept[before:] if path not in spare]
+    # REL2-VM-1: an agent-workspace with nothing in it is the empty directory
+    # core's Install made; one with anything in it stays, as before.
+    _remove_empty(share / "agent-workspace")
     kept += [child for child in _children(share) if child != SOURCE_DIR and child not in kept]
     _remove_empty(share)
     if kept:
@@ -1275,6 +1387,11 @@ def _locked_main(arguments, extra) -> int:
                             "Press Install (it fetches the pinned core again), then run this "
                             "script with --remove in a terminal: it takes the PAM entry back, "
                             "asking for your password.", code=PARTIAL)
+            # LITE-1b: and the tailscale serve mapping Install made for Odomo.
+            served = remove_tailscale_serve()
+            if served.get("removed"):
+                print(f"turned off the tailscale serve mapping on port {served['port']} that Install "
+                      f"made for Odomo", flush=True)
             devices, error = remove_ssh_lines()
             if error:
                 return fail("Omodachi Host was only partly removed.",
@@ -1288,8 +1405,8 @@ def _locked_main(arguments, extra) -> int:
                 # afterwards that they also want their pairings gone has no
                 # installer left to ask; this is the same purge core does.
                 return purge_only()
-            if devices:
-                status("done", "Removed the SSH access Omodachi Host had left behind.")
+            if devices or served.get("removed"):
+                status("done", "Removed the access Omodachi Host had left behind.")
                 return 0
             return fail("Omodachi Host is not installed here.",
                         f"{installer} does not exist, so there is nothing to remove. "

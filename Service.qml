@@ -144,6 +144,7 @@ Item {
                 runtimeSource: Qt.resolvedUrl("Service.qml").toString(),
                 revision: service.lastRevision, eventCursor: service.lastEventCursor,
                 remoteState: service.remoteState, iconState: service.iconState,
+                iconLook: Model.iconLook(service.iconState, service.takeoverLocked),
                 anchorReady: !!service.anchorItem && !!service.anchorBar,
                 takeoverLocked: service.takeoverLocked, lockNotice: service.lockNotice,
                 panelLoaded: !!service.panelInstance,
@@ -601,6 +602,70 @@ Item {
     }
     Process { id: notifyProcess; stderr: StdioCollector { } }
 
+    // TAIL-2 P1-1 / P1-2 / P1-4. What Tailscale on this computer means for
+    // Omodachi: Tailscale SSH, a route that swallows this LAN, and who really
+    // filters the tailnet. Read-only, two `tailscale` calls, so it is read
+    // when the panel opens and every 30 s while it stays open. A core without
+    // the command answers nothing, which is drawn as nothing.
+    property var tailnet: Model.tailnetReport(null)
+    Process {
+        id: tailnetProcess
+        command: ["omodachi-host", "tailnet"]
+        stdout: StdioCollector {
+            id: tailnetOutput
+            waitForEnd: true
+            onStreamFinished: service.tailnet = Model.tailnetReport(service.reply(tailnetOutput.text))
+        }
+        stderr: StdioCollector { }
+    }
+    Timer {
+        interval: 30000
+        repeat: true
+        running: !!service.panelInstance && service.panelInstance.opened
+        triggeredOnStart: true
+        onTriggered: {
+            if (!tailnetProcess.running) tailnetProcess.running = true
+            if (!odomoProcess.running) odomoProcess.running = true
+        }
+    }
+
+    // LITE-1b. Odomo's address on the tailnet - the installer's
+    // `tailscale serve` mapping - or why there is none. Read-only, no daemon.
+    property var odomo: Model.odomoStatus(null)
+    Process {
+        id: odomoProcess
+        command: ["omodachi-host", "odomo", "status"]
+        stdout: StdioCollector {
+            id: odomoOutput
+            waitForEnd: true
+            onStreamFinished: service.odomo = Model.odomoStatus(service.reply(odomoOutput.text))
+        }
+        stderr: StdioCollector { }
+    }
+    // Copying the address is the one thing the row offers; wl-copy is how
+    // everything on an Omarchy desktop puts text on the clipboard.
+    property bool odomoCopied: false
+    Process { id: copyProcess; stderr: StdioCollector { } }
+    Timer { id: odomoCopiedTimer; interval: 2000; onTriggered: service.odomoCopied = false }
+    function copyOdomoUrl() {
+        if (!service.odomo.on || copyProcess.running) return
+        copyProcess.command = ["wl-copy", "--", service.odomo.url]
+        copyProcess.running = true
+        service.odomoCopied = true
+        odomoCopiedTimer.restart()
+    }
+    // TAIL-3b. The same copy for this computer's Tailscale name, which the
+    // pair block on Overview and Devices shows.
+    property bool tailnetNameCopied: false
+    Timer { id: tailnetNameCopiedTimer; interval: 2000; onTriggered: service.tailnetNameCopied = false }
+    function copyTailnetName() {
+        if (!Model.showPairBlock(service.tailnet) || copyProcess.running) return
+        copyProcess.command = ["wl-copy", "--", service.tailnet.dns_name]
+        copyProcess.running = true
+        service.tailnetNameCopied = true
+        tailnetNameCopiedTimer.restart()
+    }
+
     Timer {
         id: adminTimeout
         // The local helper gives core's bounded worker 12 seconds.
@@ -739,6 +804,8 @@ Item {
         service.adminMessage = ""
         service.adminError = ""
         adminProcess.command = command
+        // Ending a Remote session walks the whole restore; core gives it 75 s.
+        adminTimeout.interval = operation === "remote_stop" ? 80000 : 14000
         adminTimeout.restart()
         adminProcess.running = true
         return true
@@ -789,6 +856,13 @@ Item {
         if (!command) { service.adminError = "This request changed. Refresh before rejecting."; service.refreshDevices(); return }
         service.startAdmin("reject", requestId, command, null)
     }
+    // LITE-1b: switch push to one web device off (or back on) from here,
+    // whatever the browser asked for.
+    function setDevicePush(deviceId, enabled) {
+        if (service.adminBusy) return
+        if (!service.devices.some(function(row) { return row.device_id === deviceId && row.role === "web" })) return
+        service.startAdmin("push", deviceId, ["omodachi-host", "devices", "push", deviceId, enabled ? "on" : "off"], null)
+    }
     function revokeDevice(deviceId) {
         if (service.adminBusy) return
         // `revocable` is false for this plugin's own credential. The button is
@@ -805,14 +879,39 @@ Item {
         service.startAdmin("purge", "", ["omodachi-host", "devices", "purge"], null)
     }
 
+    // REMOTE-STOP-1. The person at this computer ends the session a device is
+    // holding - Overview's End Remote session, in an Extended screen session
+    // (a takeover has this screen off and the panel locked; the command is
+    // `omodachi-host remote stop --all` from a terminal or SSH instead). Only
+    // the session the panel is showing: core refuses a stale id as not found.
+    function endRemote(sessionId) {
+        if (service.adminBusy) return
+        var command = Model.remoteStopCommand(service.snapshot, sessionId)
+        if (!command) { service.adminError = "That Remote session is not running any more."; return }
+        service.startAdmin("remote_stop", sessionId, command, null)
+    }
+
     function consumeAdmin(raw) {
         adminTimeout.stop()
         var result = service.reply(raw), operation = service.adminOperation
         var target = service.adminTarget, binding = service.adminBinding
         service.adminOperation = ""
         service.adminBinding = null
+        if (operation === "remote_stop") {
+            var ended = Model.remoteStopOutcome(raw, target, service.devices)
+            if (ended.ok) service.adminMessage = ended.message
+            else service.adminError = ended.message
+            return
+        }
         if (!result) {
             service.adminError = MediaPairing.errorMessage(MediaPairing.safeError(raw))
+            service.refreshDevices()
+            return
+        }
+        if (operation === "push") {
+            var pushed = result.push && typeof result.push.enabled === "boolean" && result.device_id === target
+            if (pushed) service.adminMessage = result.push.enabled ? "Push to this web app is on." : "Push to this web app is off."
+            else service.adminError = "The host's answer did not match this action. Refresh before retrying."
             service.refreshDevices()
             return
         }
@@ -857,6 +956,10 @@ Item {
         return !!row && typeof row.media_authorized === "boolean"
     }
     function canGrantRemote(deviceId) {
+        // LITE-1a: a web app has no Remote to repair (core reports no
+        // streaming state for it, and refuses the grant).
+        var row = service.devices.filter(function(value) { return value.device_id === deviceId })[0]
+        if (row && row.role === "web") return false
         return service.mediaAuthorizationKnown(deviceId) && !service.mediaAuthorizedFor(deviceId)
             && service.grantRemoteRequestFor(deviceId) !== ""
     }
@@ -874,6 +977,9 @@ Item {
         mediaRequestsProcess.running = false
         devicesProcess.running = false
         requestsProcess.running = false
+        tailnetProcess.running = false
+        odomoProcess.running = false
+        copyProcess.running = false
         adminProcess.running = false
         unitStateProcess.running = false
         unitActionProcess.running = false

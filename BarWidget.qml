@@ -13,6 +13,7 @@ import "OmodachiModel.js" as Model
 //
 // Study 02 D-13: four states, expressed only through opacity, the theme's
 // bar.active colour and one indicator. No colour of our own enters the bar.
+// PLUGIN-COLOR-1: the active colour is for a running Remote session only.
 OmarchyUi.BarWidget {
     id: widget
 
@@ -43,6 +44,7 @@ OmarchyUi.BarWidget {
     readonly property bool takeoverLocked: !!scopedService && scopedService.takeoverLocked
     readonly property string lockNotice: scopedService ? scopedService.lockNotice : ""
     readonly property string iconState: Model.iconState(status, remoteActive)
+    readonly property var iconLook: Model.iconLook(iconState, takeoverLocked)
 
     implicitWidth: button.implicitWidth
     implicitHeight: button.implicitHeight
@@ -234,7 +236,7 @@ OmarchyUi.BarWidget {
             // The fourth state's indicator. Same language as the official
             // indicator glyphs: the theme's active colour, nothing else.
             Rectangle {
-                visible: widget.iconState === "remote"
+                visible: widget.iconLook.indicator
                 width: Math.max(2, Math.round(parent.width / 5))
                 height: width
                 radius: 0
@@ -244,14 +246,16 @@ OmarchyUi.BarWidget {
             }
         }
 
-        // absent -> 0.45 (WidgetButton.dimmed); idle -> plain bar foreground;
-        // linked/remote -> Color.bar.active, which is what the theme calls
-        // "this machine is being used from somewhere else".
+        // Model.iconLook (PLUGIN-COLOR-1): absent -> 0.45 (WidgetButton.dimmed);
+        // idle and linked -> plain bar foreground; remote -> the active colour
+        // (bar.urgent = theme bar.active, red unless the theme sets it) plus
+        // the square, like a recording indicator: someone sees or controls
+        // this screen now. A linked phone alone is not that.
         // MENU-2 / A-67. A takeover leaves this icon with nothing to open, so
         // it reads as unavailable while one is running — and the tooltip and
         // the notice both say the same sentence.
-        dimmed: widget.iconState === "absent" || widget.takeoverLocked
-        active: widget.iconState === "linked" || widget.iconState === "remote"
+        dimmed: widget.iconLook.dimmed
+        active: widget.iconLook.active
         useActiveColor: true
         tooltipText: widget.lockNotice !== ""
             ? widget.lockNotice

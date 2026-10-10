@@ -22,6 +22,10 @@ CLI_SUBCOMMANDS = {
     "health", "state", "capabilities", "herdr", "catalog", "panel-summon", "plugin-watch",
     "plugin-action", "desktop-entry", "devices", "pair", "media-pairing", "preferences",
     "remote", "workspace", "events", "ssh",
+    # TAIL-2 (core 0.2.0): read-only Tailscale report for the Overview page.
+    "tailnet",
+    # LITE-1b: Odomo's address (`odomo status`), read-only, for Overview.
+    "odomo",
 }
 # What a deploy or a package puts on a host, mirroring scripts/deploy_plugin.py
 # and scripts/package.py. Everything else in this tree is repository
@@ -106,6 +110,26 @@ class ManifestTests(unittest.TestCase):
                 seen.add(match.group(1))
         self.assertTrue(seen)
         self.assertLessEqual(seen, CLI_SUBCOMMANDS, "argv names a subcommand core does not have")
+
+    def test_the_web_app_is_named_once_and_never_by_its_old_name(self):
+        # LITE-1c: the web app is Odomo. The panel builds every string that
+        # names it from OmodachiModel.js ODOMO_NAME, so no other string literal
+        # in the panel's code spells it, and none says the old name.
+        old = re.compile(r"\b" + "li" + r"te\b", re.IGNORECASE)
+        literal = re.compile(r"""(["'])(?:(?!\1)[^\\\n]|\\.)*\1""")
+        named, stale = [], []
+        for path in payload_files():
+            if path.suffix not in {".qml", ".js"}:
+                continue
+            code = re.sub(r"^\s*//.*$", "", path.read_text(), flags=re.MULTILINE)
+            for match in literal.finditer(code):
+                where = f"{path.relative_to(ROOT)}: {match.group(0)}"
+                if "Odomo" in match.group(0) or "ODOMO" in match.group(0):
+                    named.append(where)
+                if old.search(match.group(0)):
+                    stale.append(where)
+        self.assertEqual(named, ['OmodachiModel.js: "Odomo"'])
+        self.assertEqual(stale, [])
 
     def test_nothing_carries_an_old_spelling_of_the_name(self):
         stale = re.compile("oma" + "dochi|oma" + "dachi", re.IGNORECASE)

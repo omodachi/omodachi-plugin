@@ -49,6 +49,18 @@ Item {
         width: parent.width
         spacing: Style.spacing.controlGap
 
+        // --- TAIL-3b P04: how to pair, until a phone or tablet is ---------
+        PairPhoneBlock {
+            id: pairBlock
+            width: content.width
+            visible: Model.showDevicesPairBlock(root.service ? root.service.tailnet : null,
+                                                root.service ? root.service.devices : [],
+                                                !!root.service && root.service.devicesLoaded)
+            service: root.service
+            onFocusRequested: function(item) { root.focusRequested(item) }
+        }
+        OmarchyUi.PanelSeparator { visible: pairBlock.visible }
+
         // --- pending requests -------------------------------------------
         OmarchyUi.PanelSectionHeader {
             visible: root.pending.length > 0
@@ -64,7 +76,10 @@ Item {
 
                 Text {
                     width: parent.width
-                    text: "“" + requestCard.modelData.device_name + "” wants to connect"
+                    // TAIL-2 P1-6: `"iPhone" via Tailscale wants to connect`;
+                    // LITE-1a: a browser is named by what core calls it,
+                    // "Web app · Safari on iPhone".
+                    text: Model.requestTitle(requestCard.modelData)
                     color: root.highlightRequestId === requestCard.modelData.request_id ? Color.accent : Color.foreground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.subtitle
@@ -115,7 +130,7 @@ Item {
                     // PAIR-3: one sentence, always the same. Approve always
                     // asks for Remote as well; whether it landed is reported
                     // afterwards on the device's row, never guessed at here.
-                    text: "Approving finishes everything: the companion credential and this host's Remote certificate, in one call. No PIN, no Sunshine page."
+                    text: Model.approvalNote(requestCard.modelData)
                     color: Color.muted
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
@@ -153,7 +168,7 @@ Item {
                 }
                 Text {
                     width: parent.width
-                    text: sshCard.modelData.device_id + " · " + sshCard.modelData.short_fingerprint
+                    text: sshCard.modelData.short_fingerprint
                     color: Color.muted
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
@@ -211,7 +226,9 @@ Item {
 
                 Text {
                     width: parent.width
-                    text: "\u201c" + mediaCard.modelData.device_id + "\u201d is asking for a streaming certificate"
+                    // LITE-1b: by name, never the raw device id.
+                    text: Model.deviceLabelFor(root.service ? root.service.devices : [], mediaCard.modelData.device_id)
+                        + " is asking for a streaming certificate"
                     color: Color.foreground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.subtitle
@@ -277,7 +294,9 @@ Item {
 
                 Text {
                     width: parent.width
-                    text: deviceRow.modelData.device_id
+                    // LITE-1b: the name the device paired with, never its raw
+                    // `odomo-…`/`ios-…` id (or an old `lite-…` one).
+                    text: Model.deviceTitle(deviceRow.modelData)
                     color: Color.foreground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.body
@@ -292,15 +311,39 @@ Item {
                     // `409 plugin_credential` unless `devices revoke --force`.
                     text: deviceRow.modelData.role === "plugin"
                         ? "This plugin (cannot be revoked)"
-                        : (deviceRow.modelData.status === "authorized"
+                        : (deviceRow.modelData.role === "web" ? Model.deviceKind(deviceRow.modelData) + " · " : "")
+                          + (deviceRow.modelData.status === "authorized"
                             ? String(deviceRow.modelData.active_credentials) + " active credential(s)"
                             : deviceRow.modelData.status === "expired" ? "Credential expired" : "Access revoked")
-                          + " · " + (root.service ? root.service.mediaStatusFor(deviceRow.modelData.device_id) : "")
+                          // A web app has no Remote, so no Remote status either.
+                          + (deviceRow.modelData.role === "web" ? ""
+                             : " · " + (root.service ? root.service.mediaStatusFor(deviceRow.modelData.device_id) : ""))
                     color: Color.muted
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
+                }
+                // LITE-1b: push to a web device, and the switch for it here.
+                Row {
+                    visible: deviceRow.modelData.push !== null && deviceRow.modelData.status === "authorized"
+                    spacing: Style.spacing.controlGap
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: Model.pushLine(deviceRow.modelData)
+                        color: Color.muted
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        textFormat: Text.PlainText
+                    }
+                    OmarchyUi.Button {
+                        text: deviceRow.modelData.push && deviceRow.modelData.push.enabled ? "Turn push off" : "Turn push on"
+                        focusable: true
+                        enabled: !!root.service && !root.service.adminBusy
+                        onActiveFocusChanged: if (activeFocus) root.focusRequested(this)
+                        onClicked: root.service.setDevicePush(deviceRow.modelData.device_id,
+                            !(deviceRow.modelData.push && deviceRow.modelData.push.enabled))
+                    }
                 }
                 // CORE-2 §1: when this device's credential ends. Yellow inside its
                 // last seven days - the device renews it by itself when it next
@@ -367,7 +410,8 @@ Item {
                 Text {
                     width: parent.width
                     visible: root.revokeTarget === deviceRow.modelData.device_id
-                    text: "This device loses its companion credential and its Remote certificate. It has to be approved again next time."
+                    // LITE-1b (NEXT-1 §6.2): a web app never had a Remote certificate.
+                    text: Model.removeNote(deviceRow.modelData)
                     color: Color.muted
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall

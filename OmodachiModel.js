@@ -24,6 +24,10 @@
 // missing or non-numeric `revision`/`event_cursor`, an absent `instance_id`,
 // and a state field that must be an object and is not.
 
+// LITE-1c: the web app's name, in this one place. Every string the panel shows
+// that names the web app is built from it, so a rename is this line.
+var ODOMO_NAME = "Odomo"
+
 var REQUIRED_STATE_FIELDS = ["host", "workspace", "focus", "agent", "herdr", "capabilities", "catalog", "remote"]
 var OPTIONAL_STATE_FIELDS = ["bar", "remote_bar", "wake"]
 var STATE_FIELDS = REQUIRED_STATE_FIELDS.concat(OPTIONAL_STATE_FIELDS)
@@ -387,13 +391,28 @@ function iconState(state, remoteIsActive) {
     if (remoteIsActive === true) return "remote"
     return "linked"
 }
+// PLUGIN-COLOR-1: how each state wears the bar's two colours. The active
+// colour is the shell's `bar.urgent` (theme `bar.active`, which falls back to
+// `urgent` - red on most themes), so it means what a recording indicator
+// means: someone sees or controls this screen right now. Only "remote" is
+// that. A linked phone is the healthy everyday state and reads as the plain
+// bar foreground; absent, and anything while a takeover holds the screen,
+// is dimmed as before.
+function iconLook(state, takeoverLocked) {
+    var remote = state === "remote"
+    return {dimmed: state === "absent" || takeoverLocked === true,
+            active: remote,
+            indicator: remote}
+}
 function iconTooltip(state, remoteIsActive, remote) {
     if (iconState(state, remoteIsActive) === "remote") {
         var mode = remote && remote.mode === "takeover" ? "Takeover" : "Extended screen"
         var backend = remote && typeof remote.backend === "string" ? " · " + remote.backend : ""
+        // REMOTE-STOP-1: the left click belongs to the device; the right one
+        // is this computer's own panel, which is where the session can end.
         var line = remote && remote.mode === "takeover"
             ? TAKEOVER_LOCK_NOTICE
-            : "Click to bring the panel back to the device"
+            : "Click to bring the panel back to the device, right-click to end it here"
         return "Omodachi · Remote in progress — " + mode + backend + "\n" + line
     }
     if (state === "ready") return "Omodachi · connected\nClick for the panel, right-click for Settings"
@@ -566,6 +585,66 @@ function classifySummon(frame, requestedView) {
     return {ok: true, route: route, view: view, value: result}
 }
 
+// ---- REMOTE-STOP-1: ending a session from this computer --------------------
+// The person at this computer can always end a Remote session, whoever's it
+// is. Overview offers it while one is live; the argv is a fixed list plus the
+// id of the session the panel is showing, so a click can never end a session
+// that started after the page was drawn. core checks the caller is this user
+// (the verified Unix peer); the plugin sends no credential at all.
+var SESSION_ID = /^rs_[0-9a-f]{32}$/
+
+function liveSessionId(snapshot) {
+    if (!remoteActive(snapshot)) return ""
+    var id = snapshot.remote.session_id
+    return typeof id === "string" && SESSION_ID.test(id) ? id : ""
+}
+function canEndRemote(snapshot) { return liveSessionId(snapshot) !== "" }
+
+function remoteStopCommand(snapshot, sessionId) {
+    var id = liveSessionId(snapshot)
+    if (!id || id !== sessionId) return null
+    return ["omodachi-host", "remote", "stop", "--session-id", id]
+}
+
+// The name a person gave the device when it paired - the one its pairing card
+// showed - from the Devices list the panel already holds. "" when the list has
+// no usable name for it: a raw device id is never a name to show here.
+function deviceDisplayName(devices, deviceId) {
+    if (!Array.isArray(devices) || !validNonEmptyString(deviceId)) return ""
+    var row = devices.filter(function(item) { return isObject(item) && item.device_id === deviceId })[0]
+    var name = row ? cleanName(row.device_name) : ""
+    return name && name !== deviceId ? name : ""
+}
+
+// What the End button's one line under the panel says afterwards. `raw` is the
+// CLI's stdout: JSON on success and on a refusal core explains, nothing at all
+// from a core older than REMOTE-STOP-1 (argparse wants a credential there).
+// `devices` is the panel's Devices list, for the holding device's name.
+function remoteStopOutcome(raw, sessionId, devices) {
+    var value = null
+    try { value = JSON.parse(raw) } catch (error) { value = null }
+    if (!isObject(value))
+        return {ok: false, message: "This host service cannot end a session from here yet. Update Omodachi Host, or end it on the device."}
+    if (value.ok !== true) {
+        if (value.error === "session_not_found") return {ok: true, message: "That Remote session had already ended."}
+        var code = validErrorCode(value.error) ? value.error.replace(/_/g, " ") : "error"
+        return {ok: false, message: "The host did not end the session (" + code + ")."}
+    }
+    var result = isObject(value.result) ? value.result : {}
+    var rows = Array.isArray(result.sessions) ? result.sessions : []
+    var row = rows.filter(function(item) { return isObject(item) && item.session_id === sessionId })[0]
+    if (!row) return {ok: true, message: "That Remote session had already ended."}
+    if (row.released !== true) {
+        var steps = (Array.isArray(row.errors) ? row.errors : []).map(function(item) {
+            return isObject(item) && validErrorCode(item.step) ? item.step : ""
+        }).filter(function(step) { return step !== "" })
+        return {ok: false, message: "The session ended, but the host could not put back: "
+            + (steps.length ? steps.join(", ") : "everything") + ". Run omodachi-host remote recover."}
+    }
+    var owner = deviceDisplayName(devices, row.owner_device_id) || "the device"
+    return {ok: true, message: "Remote session ended; " + owner + " was told it ended on this computer."}
+}
+
 // ---- presentation ---------------------------------------------------------
 // A reachable host service is not a connected Remote screen; say so exactly.
 
@@ -618,7 +697,9 @@ function overviewRows(snapshot, state) {
 // under the same PLUG-2 rule as every other frame: read what the page draws,
 // carry an unknown enum through with a neutral fallback, and never drop a whole
 // list because one row used a name this build has not seen.
-var DEVICE_ROLES = ["companion", "plugin"]
+// LITE-1a: `web` is a browser running Odomo, the web app - the same credential
+// reaching fewer routes, never the screen and never SSH.
+var DEVICE_ROLES = ["companion", "plugin", "web"]
 // A host from before PAIR-2 sends no `role` at all. Everything it lists is a
 // companion, which is what it was before the plugin's own row was labelled.
 function deviceRole(value) {
@@ -656,7 +737,11 @@ function devices(result) {
             // The one row this panel must not offer a button for: revoking it
             // takes away the page the revoke would be undone from, and core
             // answers `plugin_credential` to anything that tries.
-            revocable: deviceRole(row.role) !== "plugin" && (row.status === "authorized" || row.status === "expired")})
+            revocable: deviceRole(row.role) !== "plugin" && (row.status === "authorized" || row.status === "expired"),
+            // LITE-1b: a web device's push, as core reports it. `null` is an
+            // older core, or not a web device: nothing to draw.
+            push: deviceRole(row.role) === "web" && isObject(row.push) && typeof row.push.subscribed === "boolean"
+                && typeof row.push.enabled === "boolean" ? {subscribed: row.push.subscribed, enabled: row.push.enabled} : null})
     }
     return rows
 }
@@ -732,6 +817,38 @@ function cleanName(value) {
         .replace(/\s+/g, " ").trim()
     return Array.from(text).slice(0, NAME_LIMIT).join("").trim()
 }
+// TAIL-2 P1-6. `via` is core's `{kind, peer_name, login}`; an older core sends
+// none, and then a 100.64/10 or fd7a:115c:a1e0::/48 source is still read as
+// the tailnet so its address is never what the card shows.
+function isTailnetAddress(value) {
+    if (typeof value !== "string") return false
+    var v4 = /^100\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(value)
+    if (v4) return Number(v4[1]) >= 64 && Number(v4[1]) <= 127
+    return /^fd7a:115c:a1e0:/i.test(value)
+}
+function requestVia(value, remoteAddr) {
+    var kinds = ["lan", "tailnet", "loopback", "other"]
+    var kind = isObject(value) && kinds.indexOf(value.kind) >= 0 ? value.kind
+        : isTailnetAddress(remoteAddr) ? "tailnet" : ""
+    function text(raw, limit) {
+        var clean = cleanName(typeof raw === "string" ? raw : "")
+        return Array.from(clean).slice(0, limit).join("")
+    }
+    return {kind: kind,
+            peer_name: isObject(value) ? text(value.peer_name, 64) : "",
+            login: isObject(value) ? text(value.login, 128) : ""}
+}
+// The card's heading: `"iPad" via Tailscale` on the tailnet, otherwise the
+// name alone. The login, when Tailscale knows one, is in the detail line.
+// LITE-1a: a browser is named by what core calls it ("Web app · Safari on
+// iPhone"); NEXT-1: it has the same `via` as the App, so the same suffix.
+function requestTitle(row) {
+    if (!isObject(row)) return ""
+    var name = row.web === true ? (row.client_label || "Web app")
+        : "\u201c" + (cleanName(row.device_name) || "Unnamed device") + "\u201d"
+    var via = isObject(row.via) && row.via.kind === "tailnet" ? " via Tailscale" : ""
+    return name + via + " wants to connect"
+}
 function pairRequests(result) {
     if (!isObject(result) || !Array.isArray(result.requests)) return null
     var rows = []
@@ -739,13 +856,27 @@ function pairRequests(result) {
         var row = result.requests[i]
         if (!isObject(row) || !/^pair_[0-9a-f]{32}$/.test(row.request_id)) continue
         if (typeof row.device_name !== "string" || !validDeviceId(row.device_id)) continue
+        var via = requestVia(row.via, row.remote_addr)
+        var web = isObject(row.client) && row.client.kind === "web"
         rows.push({request_id: row.request_id, device_id: row.device_id,
             device_name: cleanName(row.device_name) || "Unnamed device",
             status: typeof row.status === "string" ? row.status : "",
+            // LITE-1a: a browser asking. Core formats the label ("Web app ·
+            // Safari on iPhone") and cleans the browser's half like a name;
+            // it is cleaned again here for an older core. A web request is
+            // never a screen and never SSH, so its card says less.
+            web: web,
+            client_label: web ? (cleanName(row.client_label) || "Web app") : "",
             // PAIR-2: with no invitation to vouch for it, where the request came
             // from is what tells "the iPad in my hand" from "something else on
             // this network". It is context for the decision, not authorization.
-            remote_addr: typeof row.remote_addr === "string" && row.remote_addr.length <= 45 ? row.remote_addr : "",
+            // TAIL-2 P1-6: over the tailnet the card says who Tailscale says it
+            // is, and the raw 100.x is not carried at all.
+            remote_addr: via.kind === "tailnet" ? ""
+                : typeof row.remote_addr === "string" && row.remote_addr.length <= 45 ? row.remote_addr : "",
+            via: via,
+            // TAIL-2 P0-2: this device already holds a credential here.
+            already_paired: row.already_paired === true,
             ssh_fingerprint: shortSshFingerprint(row.ssh_fingerprint)})
     }
     return rows
@@ -759,7 +890,10 @@ function pairRequests(result) {
 // runs every Omarchy menu row (shutdown and remove among them) and - when the
 // request carries a key - gets an SSH login.
 var GRANT_LINE = "Approving grants: screen, keyboard and mouse · agent · Herdr sessions · every menu action, including power and remove"
+// LITE-1a: what a web app gets, which is less, and says what it never gets.
+var WEB_GRANT_LINE = "Approving grants this browser: every menu action, including power and remove · keybindings · notifications. Never the screen, never SSH."
 function grantLine(row) {
+    if (isObject(row) && row.web === true) return WEB_GRANT_LINE
     if (isObject(row) && row.ssh_fingerprint)
         return "Approving grants: screen, keyboard and mouse · SSH login (" + row.ssh_fingerprint
             + ") · agent · Herdr sessions · every menu action, including power and remove"
@@ -768,14 +902,208 @@ function grantLine(row) {
 function requestDetail(row) {
     if (!isObject(row)) return ""
     var parts = [row.device_id]
-    if (row.remote_addr) parts.push("from " + row.remote_addr)
+    var via = isObject(row.via) ? row.via : {kind: ""}
+    if (via.kind === "tailnet") {
+        // Never the 100.x: who Tailscale on this computer says asked.
+        var who = via.peer_name ? "Tailscale device " + via.peer_name : "Tailscale"
+        parts.push("via " + who + (via.login ? " (" + via.login + ")" : ""))
+    } else if (row.remote_addr) parts.push("from " + row.remote_addr)
     if (row.ssh_fingerprint) parts.push(row.ssh_fingerprint)
+    if (row.already_paired === true) parts.push("already paired - approving replaces its credential")
     return parts.join(" · ")
+}
+// The sentence under the buttons, which used to promise a Remote certificate
+// to every request.
+function approvalNote(row) {
+    if (isObject(row) && row.web === true)
+        return "Approving gives this browser its own credential, and nothing else: no Remote certificate, no SSH key."
+    return "Approving finishes everything: the companion credential and this host's Remote certificate, in one call. No PIN, no Sunshine page."
+}
+// LITE-1b: what a device row is called. The name it paired with; for a row
+// without one, what kind of device it is - never the raw `odomo-…`/`ios-…` id
+// (a long-standing backlog item: the id is for the machine, not the person).
+// A web device paired before LITE-1c still has an old `lite-…` id; nothing
+// here depends on either prefix.
+function deviceTitle(row) {
+    if (!isObject(row)) return "Unnamed device"
+    if (row.role === "plugin") return "This computer's panel"
+    var name = cleanName(row.device_name)
+    if (name && name !== row.device_id) return name
+    return row.role === "web" ? "Web app" : "Unnamed device"
+}
+// The device a request or a certificate attempt belongs to, by name, from the
+// Devices list the panel already holds.
+function deviceLabelFor(devices, deviceId) {
+    return deviceDisplayName(devices, deviceId) || "A paired device"
+}
+// LITE-1b: push to a web device. One line for its row.
+function pushLine(row) {
+    if (!isObject(row) || row.role !== "web" || !isObject(row.push)) return ""
+    if (!row.push.enabled) return "Push: off on this computer"
+    return row.push.subscribed ? "Push: on" : "Push: not turned on in this browser"
+}
+// What Remove takes away, said for the kind of device it is.
+function removeNote(row) {
+    if (isObject(row) && row.role === "web")
+        return "This web app loses its credential and its push subscription. It has to be approved again next time."
+    return "This device loses its companion credential and its Remote certificate. It has to be approved again next time."
+}
+
+// --- LITE-1b: Odomo's address (`omodachi-host odomo status`) ---------------
+//
+// Read-only, no daemon: the installer's `tailscale serve` record and whether
+// serve still agrees. `on` with the URL to open on a phone, or why not and
+// the command that fixes it. An older core has no such command: nothing to say.
+var ODOMO_REASONS = {
+    tailscale_not_installed: ODOMO_NAME + " needs Tailscale on this computer: it is how a phone reaches it with a real certificate.",
+    tailscale_not_running: "Tailscale is not running here, so " + ODOMO_NAME + " has no address.",
+    not_enabled: ODOMO_NAME + " has no address on your tailnet yet.",
+    operator_required: "Tailscale only lets its operator add the address. Run in a terminal:",
+    mapping_missing: ODOMO_NAME + "'s tailscale serve mapping is gone. Run in a terminal:",
+    serve_status_unreadable: "Could not read tailscale serve's state."
+}
+var ODOMO_NO_ADDRESS = ODOMO_NAME + " has no address."
+// Overview's section header for it.
+var ODOMO_HEADER = ODOMO_NAME.toUpperCase()
+function odomoStatus(result) {
+    var empty = {known: false, on: false, url: "", text: "", command: ""}
+    if (!isObject(result)) return empty
+    var url = typeof result.odomo_url === "string" && /^https:\/\/[a-z0-9.-]+\.ts\.net(:[0-9]{1,5})?\/odomo\/$/.test(result.odomo_url)
+        ? result.odomo_url : ""
+    if (result.enabled === true && url)
+        return {known: true, on: true, url: url, text: "Open this on your phone, then Share \u203a Add to Home Screen.",
+                command: ""}
+    var command = typeof result.command === "string" && /^[a-zA-Z0-9 $=._:/+-]{1,120}$/.test(result.command)
+        ? result.command : ""
+    var text = ODOMO_REASONS[result.reason] || ODOMO_NO_ADDRESS
+    if (!command && (result.reason === "operator_required" || result.reason === "mapping_missing")) text = ODOMO_REASONS.not_enabled
+    return {known: true, on: false, url: "", text: text, command: command}
+}
+
+// LITE-1d: one line under Odomo's address - how many of the web devices
+// paired here get its notifications (subscribed, push on, still authorized).
+// The same three things core counts for the native app's `odomo.push_devices`.
+// "" when the device list is not read yet or an older core reports no push.
+function odomoPushLine(rows, loaded) {
+    if (!loaded || !Array.isArray(rows)) return ""
+    var web = rows.filter(function(row) { return isObject(row) && row.role === "web" && isObject(row.push) })
+    if (!web.length && !rows.some(function(row) { return isObject(row) && row.role === "web" })) return "No phone gets notifications from " + ODOMO_NAME + " yet."
+    if (!web.length) return ""
+    var count = web.filter(function(row) {
+        return row.status === "authorized" && row.push.subscribed === true && row.push.enabled === true
+    }).length
+    if (count === 0) return "No phone gets notifications from " + ODOMO_NAME + " yet."
+    return count === 1 ? "1 phone gets notifications from " + ODOMO_NAME + "."
+                       : count + " phones get notifications from " + ODOMO_NAME + "."
+}
+
+function deviceKind(row) {
+    if (!isObject(row)) return ""
+    if (row.role === "plugin") return "This plugin (cannot be revoked)"
+    return row.role === "web" ? "Web app (" + ODOMO_NAME + ")" : ""
 }
 function requestNotification(row) {
     if (!isObject(row) || typeof row.device_name !== "string") return null
-    return {title: "\u201c" + (cleanName(row.device_name) || "Unnamed device") + "\u201d wants to connect",
+    return {title: requestTitle(row),
             body: requestDetail(row) + "\n" + grantLine(row)}
+}
+
+// --- TAIL-2: what Tailscale on this computer means for Omodachi -------------
+//
+// `omodachi-host tailnet` (core 0.2.0+) is read-only. The panel draws its own
+// sentences per warning id rather than core's, so an id this build does not
+// know is skipped instead of drawn unchecked. An older core has no such
+// command: that is "nothing to say", never an error on the page.
+var TAILNET_WARNINGS = ["tailscale_ssh", "accept_routes_lan", "tailnet_firewall"]
+var ACCEPT_ROUTES_FIX = "tailscale set --accept-routes=false"
+// TAIL-3b: `state` is what the pair block says. "" when there is no report at
+// all (an older core, or not read yet): that is nothing to say, never "absent".
+function tailnetState(result) {
+    if (!isObject(result)) return ""
+    if (result.installed === false) return "absent"
+    return result.running === true ? "running" : "signed_out"   // NeedsLogin / Stopped / NoState / null
+}
+function tailnetReport(result) {
+    var empty = {running: false, dns_name: "", short_name: "", state: "", warnings: []}
+    if (!isObject(result)) return empty
+    var routes = []
+    if (Array.isArray(result.lan_routes_captured))
+        for (var i = 0; i < result.lan_routes_captured.length && i < 16; i++) {
+            var route = result.lan_routes_captured[i]
+            if (typeof route === "string" && /^[0-9a-fA-F:.]+\/\d{1,3}$/.test(route)) routes.push(route)
+        }
+    var ids = []
+    if (Array.isArray(result.warnings))
+        for (var j = 0; j < result.warnings.length && j < 8; j++) {
+            var id = isObject(result.warnings[j]) ? result.warnings[j].id : ""
+            if (TAILNET_WARNINGS.indexOf(id) >= 0 && ids.indexOf(id) < 0) ids.push(id)
+        }
+    var warnings = []
+    // Order is severity, not core's order.
+    for (var k = 0; k < TAILNET_WARNINGS.length; k++) {
+        var wanted = TAILNET_WARNINGS[k]
+        if (ids.indexOf(wanted) < 0) continue
+        if (wanted === "tailscale_ssh")
+            warnings.push({id: wanted, severe: true,
+                text: "Tailscale SSH is on. SSH over Tailscale ignores Omodachi's device approval; "
+                      + "revoking a device here does not stop it. Your tailnet's SSH rules decide who gets in."})
+        else if (wanted === "accept_routes_lan")
+            warnings.push({id: wanted, severe: true, command: ACCEPT_ROUTES_FIX,
+                text: "Tailscale is routing this computer's own network"
+                      + (routes.length ? " (" + routes.join(", ") + ")" : "")
+                      + " through the tailnet, so pairing and connecting on this Wi-Fi may fail. "
+                      + "To fix it, run in a terminal: " + ACCEPT_ROUTES_FIX})
+        else
+            warnings.push({id: wanted, severe: false,
+                text: "Over Tailscale, your tailnet's access rules decide who can reach this computer, "
+                      + "not ufw: Tailscale accepts tailscale0 before ufw sees it."})
+    }
+    var name = typeof result.dns_name === "string" && /^[a-z0-9.-]{1,253}\.ts\.net$/.test(result.dns_name)
+        ? result.dns_name : ""
+    return {running: result.running === true, dns_name: name, short_name: name ? name.split(".")[0] : "",
+            state: tailnetState(result), warnings: warnings}
+}
+
+// --- TAIL-3b: pairing a phone or tablet, as the panel says it ---------------
+//
+// Every string the pair block and the Tailscale paragraphs draw lives here, so
+// a copy pass touches this one table.
+var PAIR_TEXT = {
+    header: "PAIR A PHONE OR TABLET",
+    nameLabel: "This computer's name on Tailscale",
+    copy: "Copy",
+    copied: "Copied",
+    shortPrefix: "or just ",
+    how: "Open Omodachi on your iPhone or iPad and paste this name.",
+    signedOut: "Tailscale is installed but not signed in. Sign in from Tailscale in the bar, or run "
+               + "tailscale up. Until then phones pair on this Wi-Fi only.",
+    absent: "Without Tailscale, phones pair on this Wi-Fi only. To add it: "
+            + "Omarchy menu \u203a Install \u203a Service \u203a Tailscale."
+}
+// The strings for one report: the short-name line filled in, and the one
+// paragraph a node that is not running gets (or "").
+function pairText(report) {
+    var r = isObject(report) ? report : {}
+    var shortName = typeof r.short_name === "string" ? r.short_name : ""
+    return {header: PAIR_TEXT.header, nameLabel: PAIR_TEXT.nameLabel, copy: PAIR_TEXT.copy,
+            copied: PAIR_TEXT.copied, how: PAIR_TEXT.how,
+            short: shortName ? PAIR_TEXT.shortPrefix + shortName : "",
+            note: r.state === "signed_out" ? PAIR_TEXT.signedOut : r.state === "absent" ? PAIR_TEXT.absent : ""}
+}
+// Overview: the block whenever Tailscale runs here and has a name to give.
+function showPairBlock(report) {
+    return isObject(report) && report.state === "running" && typeof report.dns_name === "string"
+        && report.dns_name !== ""
+}
+// Devices: the same block on top, until a phone or tablet is paired. A web app
+// (Odomo) and this computer's own panel are not one.
+function hasPairedCompanion(devices) {
+    return (Array.isArray(devices) ? devices : []).some(function(row) {
+        return isObject(row) && row.status === "authorized" && row.role !== "plugin" && row.role !== "web"
+    })
+}
+function showDevicesPairBlock(report, devices, devicesLoaded) {
+    return showPairBlock(report) && devicesLoaded === true && !hasPairedCompanion(devices)
 }
 
 // RELEASE-9 (B2). A paired device that was never granted a terminal offered an
