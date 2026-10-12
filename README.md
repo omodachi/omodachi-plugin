@@ -48,7 +48,7 @@ VA-API video encoder, and through WayVNC otherwise.
 `omarchy-restart-shell`: the running shell keeps the plugin version it loaded
 until it restarts.
 
-This is version **0.2.1** of the plugin, and it installs the `v0.2.0` tag of
+This is version **0.2.2** of the plugin, and it installs the `v0.2.1` tag of
 the host daemon, at the full commit `omodachi.json` pins. What Install changes,
 and how to take it all back, is under [Security model](#security-model) and
 [Remove](#remove).
@@ -225,7 +225,7 @@ only. The panel never runs `tailscale up` for you.
 [`omodachi-core`](https://github.com/omodachi/omodachi-core) into
 `~/.local/share/omodachi/src` and runs that checkout's own installer in a
 visible terminal. Core is pinned by commit, not only by tag: `omodachi.json`
-carries the full 40-character commit that `v0.2.0` names, the checkout is that
+carries the full 40-character commit that `v0.2.1` names, the checkout is that
 commit, detached, and any other commit is refused. Every Install fetches into a
 new directory, so nothing left in the old checkout is used. Right before it
 runs anything from that checkout, Install deletes the build output core's
