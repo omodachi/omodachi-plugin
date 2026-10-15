@@ -3,7 +3,7 @@
   "core_source": {
     "owner": "omodachi",
     "repository": "omodachi-core",
-    "ref": "v0.2.1",
-    "commit": "acb35562012b955650532b52061ca1dafd0e7e02"
+    "ref": "v0.2.2",
+    "commit": "e9afa5e2f70224dc24e7538ee91840a8b01bcd56"
   }
 }

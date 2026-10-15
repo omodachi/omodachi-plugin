@@ -245,7 +245,7 @@ class PinnedCommitTests(UpstreamCase):
 
     def test_the_shipped_pin_carries_a_full_commit_beside_the_tag(self):
         pin = json.loads((ROOT / "omodachi.json").read_text())["core_source"]
-        self.assertEqual(pin["ref"], "v0.2.1")
+        self.assertEqual(pin["ref"], "v0.2.2")
         self.assertTrue(self.module.is_full_commit(pin.get("commit")), pin.get("commit"))
 
 
